@@ -95,11 +95,41 @@ export default function LiveViewPage() {
   // Получить имя камеры по id
   const getCameraName = (cid: string) => cameras.find((c) => c.id === cid)?.name || cid.slice(0, 8);
 
+  // Получить свежий токен (через refresh или напрямую из login)
+  const getFreshToken = useCallback(async (): Promise<string> => {
+    let token = localStorage.getItem('access_token');
+    if (token) return token;
+
+    // Пробуем refresh
+    const refresh = localStorage.getItem('refresh_token');
+    if (refresh) {
+      try {
+        const res = await fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refresh }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          localStorage.setItem('access_token', data.access_token);
+          localStorage.setItem('refresh_token', data.refresh_token);
+          return data.access_token;
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Если refresh не сработал — редирект на логин
+    localStorage.clear();
+    window.location.href = '/login';
+    return '';
+  }, []);
+
   // Поток для ячейки (суб-поток, скейл под размер)
   const getStreamUrl = (cameraId: string, isFullscreen = false) => {
     const token = localStorage.getItem('access_token') || '';
     if (isFullscreen) {
-      return `/api/cameras/${cameraId}/stream?stream=0&fps=15&quality=3&token=${token}`;
+      // Основной поток, но со скейлом до Full HD (4K слишком тяжёлый)
+      return `/api/cameras/${cameraId}/stream?stream=0&fps=10&quality=5&scale=1920:1080&token=${token}`;
     }
     // Для сетки: доп поток, низкое качество
     return `/api/cameras/${cameraId}/stream?stream=1&fps=5&quality=12&token=${token}`;
