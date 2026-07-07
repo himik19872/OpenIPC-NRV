@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "NRV Mobile",
+    "slug": "nrv-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1677ff",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nrv.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1677ff"
+      },
+      "package": "com.nrv.mobile"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications"
+    ]
+  }
+}

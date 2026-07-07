@@ -1,0 +1,116 @@
+# NRV — Docker Compose (production)
+# Запуск: docker compose -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nrv-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-nrv_db}
+      POSTGRES_USER: ${DB_USER:-nrv_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nrv_user} -d ${DB_NAME:-nrv_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: nrv-redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    container_name: nrv-backend
+    env_file:
+      - backend/.env
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-nrv_user}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-nrv_db}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - media_data:/var/media/nrv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: nrv-worker
+    env_file:
+      - backend/.env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-nrv_user}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-nrv_db}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - media_data:/var/media/nrv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: nrv-beat
+    command: celery -A app.core.celery_app beat --loglevel=info
+    env_file:
+      - backend/.env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-nrv_user}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-nrv_db}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    container_name: nrv-frontend
+    volumes:
+      - media_data:/var/media/nrv:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: always
+
+volumes:
+  postgres_data:
+  media_data:
