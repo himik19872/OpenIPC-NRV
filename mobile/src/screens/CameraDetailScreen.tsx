@@ -53,14 +53,14 @@ export default function CameraDetailScreen({ route }: any) {
           {camera.is_online ? 'RTSP поток' : 'Нет сигнала'}
         </Text>
         {camera.is_online && (
-          <Text style={{ color: '#aaa', fontSize: 12, marginTop: 8 }}>{camera.rtsp_url}</Text>
+          <Text style={{ color: '#aaa', fontSize: 12, marginTop: 8 }}>{camera.rtsp_main_url}</Text>
         )}
       </View>
 
       <View style={styles.infoRow}>
         <View style={styles.infoItem}>
           <Text style={styles.infoLabel}>RTSP</Text>
-          <Text style={styles.infoValue} numberOfLines={1}>{camera.rtsp_url}</Text>
+          <Text style={styles.infoValue} numberOfLines={1}>{camera.rtsp_main_url}</Text>
         </View>
         <View style={styles.infoItem}>
           <Text style={styles.infoLabel}>Локация</Text>

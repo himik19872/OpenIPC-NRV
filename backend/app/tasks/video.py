@@ -146,7 +146,7 @@ def check_cameras_online() -> dict:
 
     try:
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT id, rtsp_url FROM cameras WHERE is_enabled = true"))
+            result = conn.execute(text("SELECT id, rtsp_main_url FROM cameras WHERE is_enabled = true"))
             cameras = result.fetchall()
 
             online_count = 0

@@ -14,7 +14,8 @@ const { Title, Text } = Typography;
 interface Camera {
   id: string;
   name: string;
-  rtsp_url: string;
+  rtsp_main_url: string;
+  rtsp_sub_url?: string;
   is_online: boolean;
   location: string;
   manufacturer: string;
@@ -124,16 +125,25 @@ export default function LiveViewPage() {
     return '';
   }, []);
 
-  // Поток для ячейки (суб-поток, скейл под размер)
-  const getStreamUrl = (cameraId: string, isFullscreen = false) => {
+  // Поток для ячейки — H.264 через ffmpeg -c copy (БЕЗ перекодирования!)
+  //   stream=1 = доп. поток (низкое качество) — для сетки (снижаем нагрузку)
+  //   stream=0 = основной поток (высокое качество) — для fullscreen
+  const getStreamUrl = (cameraId: string, streamIdx: number) => {
     const token = localStorage.getItem('access_token') || '';
-    if (isFullscreen) {
-      // Основной поток, но со скейлом до Full HD (4K слишком тяжёлый)
-      return `/api/cameras/${cameraId}/stream?stream=0&fps=10&quality=5&scale=1920:1080&token=${token}`;
-    }
-    // Для сетки: доп поток, низкое качество
-    return `/api/cameras/${cameraId}/stream?stream=1&fps=5&quality=12&token=${token}`;
+    return `/api/cameras/${cameraId}/stream/mse?stream=${streamIdx}&token=${token}`;
   };
+
+  // Форсируем перезагрузку видео при смене потока (sub↔main)
+  const gridVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const fullscreenVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // При открытии fullscreen — перезагружаем видео с основным потоком
+  useEffect(() => {
+    if (fullscreenCam && fullscreenVideoRef.current) {
+      fullscreenVideoRef.current.load();
+      fullscreenVideoRef.current.play().catch(() => {});
+    }
+  }, [fullscreenCam]);
 
   // Переключение паузы ячейки
   const togglePause = (cameraId: string) => {
@@ -208,11 +218,14 @@ export default function LiveViewPage() {
             >
               {cam ? (
                 <>
-                  {/* MJPEG стрим */}
+                  {/* H.264 MSE стрим — БЕЗ перекодирования! */}
                   {!isPaused && (
-                    <img
-                      src={getStreamUrl(cam.id)}
-                      alt={cam.name}
+                    <video
+                      src={getStreamUrl(cam.id, 1)}
+                      autoPlay
+                      playsInline
+                      muted
+                      loop
                       style={{
                         width: '100%',
                         height: '100%',
@@ -315,9 +328,13 @@ export default function LiveViewPage() {
             minHeight: 'calc(90vh - 120px)',
             background: '#000',
           }}>
-            <img
-              src={getStreamUrl(fullscreenCam, true)}
-              alt="Fullscreen stream"
+            <video
+              key={fullscreenCam}
+              ref={fullscreenVideoRef}
+              src={getStreamUrl(fullscreenCam, 0)}
+              autoPlay
+              playsInline
+              controls
               style={{
                 maxWidth: '100%',
                 maxHeight: 'calc(90vh - 120px)',

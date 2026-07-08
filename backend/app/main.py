@@ -12,6 +12,12 @@ from app.api.auth import router as auth_router
 from app.api.cameras import router as cameras_router
 from app.api.scanner import router as scanner_router
 from app.api.users import router as users_router
+
+# Опционально: детекция объектов (требует numpy, opencv-python)
+try:
+    from app.api.detections import router as detections_router
+except Exception:
+    detections_router = None
 from app.core.config import get_settings
 from app.core.database import create_tables
 from app.core.redis import redis_client
@@ -36,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="NRV — Network Video Recorder API",
-    description="Промышленный NVR для камер OpenIPC. RTSP + WebRTC.",
+    description="Промышленный NVR для камер OpenIPC. RTSP + WebRTC + GPU Detection.",
     version="0.1.0",
     lifespan=lifespan,
     docs_url="/api/docs",
@@ -56,6 +62,8 @@ app.add_middleware(
 # Подключаем роутеры
 app.include_router(auth_router, prefix="/api")
 app.include_router(cameras_router, prefix="/api")
+if detections_router is not None:
+    app.include_router(detections_router, prefix="/api")
 app.include_router(scanner_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 

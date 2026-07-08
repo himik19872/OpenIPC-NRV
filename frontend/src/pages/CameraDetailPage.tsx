@@ -16,7 +16,10 @@ const { Title, Text } = Typography;
 interface CameraDetail {
   id: string;
   name: string;
-  rtsp_url: string;
+  rtsp_main_url: string;
+  rtsp_sub_url?: string;
+  rtsp_proxy_main_url?: string;
+  rtsp_proxy_sub_url?: string;
   webrtc_url: string | null;
   manufacturer: string;
   location: string;
@@ -189,9 +192,11 @@ export default function CameraDetailPage() {
                 borderRadius: '0 0 8px 8px',
               }}>
                 {camera.is_online ? (
-                  <img
-                    src={`/api/cameras/${camera.id}/stream`}
-                    alt="RTSP Stream"
+                  <video
+                    src={`/api/cameras/${camera.id}/stream/mse?stream=1&token=${localStorage.getItem('access_token')}`}
+                    autoPlay
+                    playsInline
+                    muted
                     style={{ maxWidth: '100%', maxHeight: '100%' }}
                   />
                 ) : (
@@ -271,7 +276,13 @@ export default function CameraDetailPage() {
           <Col xs={24} md={12}>
             <Card title="Информация" variant="outlined">
               <Descriptions column={1} size="small">
-                <Descriptions.Item label="RTSP">{camera.rtsp_url}</Descriptions.Item>
+                <Descriptions.Item label="RTSP (основной)">{camera.rtsp_main_url}</Descriptions.Item>
+                {camera.rtsp_sub_url && (
+                  <Descriptions.Item label="RTSP (доп.)">{camera.rtsp_sub_url}</Descriptions.Item>
+                )}
+                {camera.rtsp_proxy_main_url && (
+                  <Descriptions.Item label="RTSP-прокси (осн.)">{camera.rtsp_proxy_main_url}</Descriptions.Item>
+                )}
                 <Descriptions.Item label="Производитель">{camera.manufacturer}</Descriptions.Item>
                 <Descriptions.Item label="Локация">{camera.location || '-'}</Descriptions.Item>
                 <Descriptions.Item label="WebSocket">{camera.ws_video_url || '-'}</Descriptions.Item>

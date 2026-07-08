@@ -87,7 +87,7 @@ async def add_found_camera(
 
     async with async_session_factory() as db:
         existing = await db.execute(
-            select(Camera).where(Camera.rtsp_url == cam_info["rtsp_url"])
+            select(Camera).where(Camera.rtsp_main_url == cam_info["rtsp_main_url"])
         )
         if existing.scalar_one_or_none():
             raise HTTPException(
@@ -97,7 +97,8 @@ async def add_found_camera(
 
         camera = Camera(
             name=f"OpenIPC {cam_info['model']} ({ip})",
-            rtsp_url=cam_info["rtsp_url"],
+            rtsp_main_url=cam_info["rtsp_main_url"],
+            rtsp_sub_url=cam_info.get("rtsp_sub_url"),
             manufacturer=cam_info["model"],
             firmware=cam_info["firmware"],
             location=f"Auto-discovered at {ip}",

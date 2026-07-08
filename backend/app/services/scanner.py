@@ -25,7 +25,9 @@ class DiscoveredCamera:
     ip_address: str
     model: str = "OpenIPC"
     firmware: str = ""
-    rtsp_url: str = ""
+    rtsp_main_url: str = ""     # Основной поток (H.264/H.265, высокое качество)
+    rtsp_sub_url: str = ""      # Дополнительный поток (низкое качество)
+    rtsp_url: str = ""          # Устаревшее, для обратной совместимости
     snapshot_url: str = ""
     majestic_config: Optional[dict] = None
     is_online: bool = False
@@ -35,7 +37,9 @@ class DiscoveredCamera:
             "ip_address": self.ip_address,
             "model": self.model,
             "firmware": self.firmware,
-            "rtsp_url": self.rtsp_url,
+            "rtsp_main_url": self.rtsp_main_url,
+            "rtsp_sub_url": self.rtsp_sub_url,
+            "rtsp_url": self.rtsp_main_url,  # обратная совместимость
             "snapshot_url": self.snapshot_url,
             "is_online": self.is_online,
         }
@@ -87,8 +91,10 @@ async def discover_camera_at_ip(ip: str, timeout: float = 2.0) -> Optional[Disco
                 except Exception:
                     pass
 
-            # Формируем RTSP URL
-            cam.rtsp_url = f"rtsp://root:12345@{ip}/stream=0"
+            # Формируем RTSP URL'ы для основного и дополнительного потоков
+            cam.rtsp_main_url = f"rtsp://root:12345@{ip}/stream=0"
+            cam.rtsp_sub_url = f"rtsp://root:12345@{ip}/stream=1"
+            cam.rtsp_url = cam.rtsp_main_url  # обратная совместимость
             cam.snapshot_url = f"{base}/image.jpg"
             cam.majestic_config = config
             cam.is_online = True
@@ -176,7 +182,9 @@ async def quick_scan(ip: str) -> Optional[dict]:
         "ip": ip,
         "model": cam.model,
         "firmware": cam.firmware,
-        "rtsp_url": cam.rtsp_url,
+        "rtsp_main_url": cam.rtsp_main_url,
+        "rtsp_sub_url": cam.rtsp_sub_url,
+        "rtsp_url": cam.rtsp_main_url,  # обратная совместимость
         "snapshot_url": cam.snapshot_url,
         "config": cam.majestic_config,
         "ports": ports,

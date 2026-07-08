@@ -28,6 +28,15 @@ services:
       timeout: 5s
       retries: 5
 
+  # go2rtc — RTSP/WebRTC прокси-сервер
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: nrv-go2rtc
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml
+    restart: always
+    command: -c /config/go2rtc.yaml
+
   backend:
     build:
       context: .
@@ -43,6 +52,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      GO2RTC_API_URL: http://go2rtc:1984/api
     volumes:
       - media_data:/var/media/nrv
     depends_on:
@@ -50,6 +60,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      go2rtc:
+        condition: service_started
     restart: always
 
   worker:

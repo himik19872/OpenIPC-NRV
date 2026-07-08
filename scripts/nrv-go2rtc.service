@@ -1,0 +1,14 @@
+[Unit]
+Description=NRV go2rtc RTSP/WebRTC Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=himik
+WorkingDirectory=/home/himik/nrv
+ExecStart=/usr/local/bin/go2rtc -c /home/himik/nrv/go2rtc.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

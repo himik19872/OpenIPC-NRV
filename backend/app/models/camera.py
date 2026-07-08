@@ -22,8 +22,14 @@ class Camera(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
 
-    # Протоколы
-    rtsp_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    # RTSP-потоки: основной (высокое качество) и дополнительный (низкое)
+    rtsp_main_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    rtsp_sub_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    # URL прокси-потоков через go2rtc (для внешних потребителей)
+    rtsp_proxy_main_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    rtsp_proxy_sub_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+
+    # WebRTC через go2rtc
     webrtc_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     go2rtc_stream: Mapped[str | None] = mapped_column(
         String(256), nullable=True, default=None

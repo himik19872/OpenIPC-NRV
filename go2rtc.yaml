@@ -1,5 +1,12 @@
-# go2rtc конфигурация для NRV
+# go2rtc конфигурация для NRV — RTSP/WebRTC прокси
 # Запуск: go2rtc -c go2rtc.yaml
+#
+# Камеры регистрируются через NRV API автоматически.
+# go2rtc забирает RTSP с камеры ОДИН раз и раздаёт:
+#   - RTSP:   rtsp://nvr:8554/cam_{id}_main  (для VLC, Frigate, Shinobi, ...)
+#   - RTSP:   rtsp://nvr:8554/cam_{id}_sub   (доп. поток)
+#   - WebRTC: через API NRV                    (для браузеров)
+#   - MJPEG:  /api/cameras/{id}/stream/proxy   (лёгкие клиенты)
 
 api:
   listen: ":1984"
@@ -7,6 +14,7 @@ api:
 
 rtsp:
   listen: ":8554"
+  default_query: "video=all"
 
 webrtc:
   listen: ":8555"
@@ -15,9 +23,49 @@ webrtc:
     - stun:stun.l.google.com:19302
 
 streams:
-  # Камеры добавляются через API NRV автоматически
-  # Пример ручного добавления:
-  # camera_entrance: rtsp://admin:pass@192.168.1.100:554/stream=0
+  # Все потоки управляются динамически через NRV API
+  # Формат имени: cam_{uuid}_main и cam_{uuid}_sub
+  cam_7507c4dd-4a04-4862-b0da-b6913b6e858d_main:
+    - rtsp://root:12345@127.0.0.1:8554/stream=0
+  cam_7507c4dd-4a04-4862-b0da-b6913b6e858d_sub:
+    - rtsp://root:12345@127.0.0.1:8554/stream=1
+  cam_77c42261-b64a-44a0-a82b-9344b26a200a_main:
+    - rtsp://root:12345@127.0.0.1:8554/stream=0
+  cam_77c42261-b64a-44a0-a82b-9344b26a200a_sub:
+    - rtsp://root:12345@127.0.0.1:8554/stream=1
+  cam_16f8d5f4-c03e-43bf-9aae-ac3063ea2ce8_main:
+    - rtsp://root:12345@127.0.0.1:8554/stream=0
+  cam_16f8d5f4-c03e-43bf-9aae-ac3063ea2ce8_sub:
+    - rtsp://root:12345@127.0.0.1:8554/stream=1
+  cam_a32c955e-4e30-425c-9a0a-5b441eef0983_main:
+    - rtsp://root:12345@192.168.1.106/stream=0#video=all&audio=all&transport=tcp
+  cam_fe66b919-c45f-4f58-9756-9e3d9b155bbc_main:
+    - rtsp://root:12345@192.168.1.103/stream=0#video=all&audio=all&transport=tcp
+  cam_ec9e26c0-9cca-4a4e-adfd-e43aa3c14a6c_main:
+    - rtsp://root:12345@192.168.1.87/stream=0#video=all&audio=all&transport=tcp
+  cam_e2e93274-1a52-40a8-b22c-c50b19330cc7_main:
+    - rtsp://root:12345@192.168.1.81/stream=0#video=all&audio=all&transport=tcp
+  cam_85feb092-479a-46f4-ba96-c7cd812a6115_main:
+    - rtsp://root:12345@192.168.1.75/stream=0#video=all&audio=all&transport=tcp
+  cam_b7703a69-e75c-4406-a93f-ae2dde4804b7_main:
+    - rtsp://root:12345@192.168.1.67/stream=0#video=all&audio=all&transport=tcp
+  cam_8002ab60-4838-4880-8f2b-97528b8deb72_main:
+    - rtsp://root:12345@192.168.1.61/stream=0#video=all&audio=all&transport=tcp
+  cam_ab8afb1f-61b4-4fea-bae6-38eea8b482f5_main:
+    - rtsp://root:12345@192.168.1.55/stream=0#video=all&audio=all&transport=tcp
+  cam_eaf54af5-c5db-4d64-aaa5-716848e12da3_main:
+    - rtsp://root:12345@192.168.1.28/stream=0#video=all&audio=all&transport=tcp
+  cam_ab1803f4-130b-4496-9901-4d0466ab24ee_main:
+    - rtsp://root:12345@192.168.1.12/stream=0#video=all&audio=all&transport=tcp
+  cam_6b5cd922-3606-4cb3-9b6d-80c13d460cf8_main:
+    - rtsp://root:12345@192.168.1.7/stream=0#video=all&audio=all&transport=tcp
+  cam_36b751ce-9592-4c4b-9caf-7b5a4faaf70c_main:
+    - rtsp://root:12345@192.168.1.5/stream=0#video=all&audio=all&transport=tcp
+  test_direct:
+    - rtsp://root:12345@192.168.1.106/stream=0
+  test_tcp:
+    - rtsp://root:12345@192.168.1.106/stream=0#video=all&audio=all&transport=tcp
 
 log:
   level: info
+  format: text

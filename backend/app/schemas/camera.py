@@ -13,7 +13,8 @@ class CameraCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=128)
     description: str = ""
-    rtsp_url: str = Field(..., max_length=512)
+    rtsp_main_url: str = Field(..., max_length=512, description="Основной RTSP-поток (высокое качество)")
+    rtsp_sub_url: Optional[str] = Field(default=None, max_length=512, description="Дополнительный RTSP-поток (низкое качество)")
     webrtc_url: Optional[str] = Field(default=None, max_length=512)
     go2rtc_stream: Optional[str] = Field(default=None, max_length=256)
     manufacturer: str = "OpenIPC"
@@ -34,7 +35,8 @@ class CameraUpdate(BaseModel):
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
     description: Optional[str] = None
-    rtsp_url: Optional[str] = Field(default=None, max_length=512)
+    rtsp_main_url: Optional[str] = Field(default=None, max_length=512)
+    rtsp_sub_url: Optional[str] = Field(default=None, max_length=512)
     webrtc_url: Optional[str] = Field(default=None, max_length=512)
     go2rtc_stream: Optional[str] = Field(default=None, max_length=256)
     manufacturer: Optional[str] = None
@@ -55,7 +57,10 @@ class CameraOut(BaseModel):
     id: uuid.UUID
     name: str
     description: str
-    rtsp_url: str
+    rtsp_main_url: str
+    rtsp_sub_url: Optional[str] = None
+    rtsp_proxy_main_url: Optional[str] = None
+    rtsp_proxy_sub_url: Optional[str] = None
     webrtc_url: Optional[str] = None
     go2rtc_stream: Optional[str] = None
     manufacturer: str
@@ -74,6 +79,18 @@ class CameraOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class CameraProxyOut(BaseModel):
+    """Информация о прокси-потоках камеры для внешних сервисов."""
+
+    camera_id: uuid.UUID
+    camera_name: str
+    rtsp_proxy_main: Optional[str] = None      # rtsp://nvr:8554/{stream_main}
+    rtsp_proxy_sub: Optional[str] = None       # rtsp://nvr:8554/{stream_sub}
+    webrtc_url: Optional[str] = None
+    mjpeg_proxy_url: Optional[str] = None      # /api/streams/{camera_id}/proxy.mjpeg
+    is_online: bool
 
 
 class CameraDetailOut(CameraOut):

@@ -18,3 +18,11 @@ ffmpeg-python==0.2.0
 aiortc==1.9.0
 structlog==24.4.0
 python-dotenv==1.0.1
+
+# GPU Acceleration - OpenCV + Deep Learning
+opencv-python-headless==4.10.0.84
+opencv-contrib-python-headless==4.10.0.84
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+ultralytics==8.2.83
+numpy==1.26.4

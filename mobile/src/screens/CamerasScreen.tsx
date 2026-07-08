@@ -38,7 +38,7 @@ export default function CamerasScreen({ navigation }: any) {
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.cameraName}>{item.name}</Text>
-              <Text style={styles.cameraUrl} numberOfLines={1}>{item.rtsp_url}</Text>
+              <Text style={styles.cameraUrl} numberOfLines={1}>{item.rtsp_main_url}</Text>
               <Text style={styles.cameraLocation}>{item.location || '-'}</Text>
             </View>
             <View style={[styles.statusBadge, { backgroundColor: item.is_online ? '#52c41a' : '#ff4d4f' }]}>

@@ -1,0 +1,16 @@
+[Unit]
+Description=NRV Backend (FastAPI)
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=himik
+WorkingDirectory=/home/himik/nrv/backend
+Environment=PATH=/home/himik/nrv/.venv/bin:/usr/bin:/bin
+ExecStart=/home/himik/nrv/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

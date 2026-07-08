@@ -11,7 +11,7 @@ interface FoundCamera {
   ip_address: string;
   model: string;
   firmware: string;
-  rtsp_url: string;
+  rtsp_main_url: string;
   snapshot_url: string;
   is_online: boolean;
 }
