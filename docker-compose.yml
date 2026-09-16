@@ -1,0 +1,100 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    # unless-stopped — поднимать контейнер при старте Docker и после сбоев,
+    # но не запускать повторно, если он был остановлен вручную.
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nvr
+      POSTGRES_USER: nvr
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-nvr_secret}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nvr"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+    ports:
+      - "8554:8554"   # RTSP
+      - "8889:8889"   # WebRTC
+      - "8888:8888"   # HLS
+      - "9997:9997"   # API управления
+
+  nats:
+    image: nats:latest
+    restart: unless-stopped
+    command: "-js"
+    ports:
+      - "127.0.0.1:4222:4222"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # host-сеть нужна, чтобы бэкенд видел камеры в локальной сети
+    # и мог обращаться к MediaMTX/Postgres/MinIO по localhost.
+    network_mode: host
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "postgres://nvr:${DB_PASSWORD:-nvr_secret}@localhost:5434/nvr?sslmode=disable"
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      LOG_FORMAT: "console"
+      MINIO_ENDPOINT: "localhost:9000"
+      # Адрес для presigned-ссылок, которые открывает браузер.
+      # При доступе извне подставить внешний адрес сервера.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: "nvr-recordings"
+      NATS_URL: "nats://localhost:4222"
+      MEDIAMTX_HOST: "localhost:8888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      mediamtx:
+        condition: service_started
+
+  webui:
+    build:
+      context: ./webui
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+    extra_hosts:
+      # Бэкенд слушает порт на хосте, а webui работает в bridge-сети —
+      # так контейнер обращается к нему через host.docker.internal.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  minio_data:

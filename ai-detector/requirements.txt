@@ -1,0 +1,6 @@
+nats-py>=0.0.1
+ultralytics==8.2.103
+opencv-python-headless==4.10.0
+numpy==1.26.4
+Pillow==10.4.0
+psutil==6.0.0

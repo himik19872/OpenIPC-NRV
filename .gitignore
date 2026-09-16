@@ -1,0 +1,44 @@
+# NVR Video Surveillance System
+
+# --- Зависимости ---
+node_modules/
+dist/
+build/
+
+# --- Go ---
+backend/tmp/
+# Скомпилированный бинарник: собирается в Docker, в репозитории не нужен.
+backend/server
+
+# --- Артефакты приложения ---
+# Модель YOLO скачивается автоматически при первом запуске ai-detector.
+*.pt
+# Записи и снапшоты
+recordings/
+backups/
+# Логи
+*.log
+nohup.out
+
+# --- Секреты и окружение ---
+.env
+*.env
+!.env.example
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Docker ---
+pgdata/
+minio_data/
+
+# --- Временные файлы ---
+*.tmp
+.cache/

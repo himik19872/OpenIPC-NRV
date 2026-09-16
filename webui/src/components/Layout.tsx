@@ -1,0 +1,62 @@
+import { NavLink, useNavigate } from 'react-router-dom'
+import { useAuth } from '../hooks/useApi'
+import {
+  LayoutDashboard, Video, AlertTriangle, HardDrive,
+  Shield, LogOut, Camera, Search
+} from 'lucide-react'
+
+const navItems = [
+  { to: '/', icon: LayoutDashboard, label: 'Дашборд' },
+  { to: '/cameras', icon: Video, label: 'Камеры' },
+  { to: '/scanner', icon: Search, label: 'Сканер' },
+  { to: '/events', icon: AlertTriangle, label: 'События' },
+  { to: '/recordings', icon: HardDrive, label: 'Архив' },
+  { to: '/acs', icon: Shield, label: 'СКУД' },
+]
+
+export default function Layout({ children }: { children: React.ReactNode }) {
+  const { logout } = useAuth()
+  const navigate = useNavigate()
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login')
+  }
+
+  return (
+    <div className="layout">
+      <aside className="sidebar">
+        <div className="sidebar-logo">
+          <Camera size={24} />
+          <span>NVR Control</span>
+        </div>
+        <nav className="sidebar-nav" style={{ flex: 1 }}>
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) =>
+                `sidebar-link${isActive ? ' active' : ''}`
+              }
+            >
+              <item.icon size={20} />
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+        </nav>
+        <button
+          onClick={handleLogout}
+          className="sidebar-link"
+          style={{ background: 'none', width: '100%', textAlign: 'left' }}
+        >
+          <LogOut size={20} />
+          <span>Выйти</span>
+        </button>
+      </aside>
+      <main className="main-content">
+        {children}
+      </main>
+    </div>
+  )
+}

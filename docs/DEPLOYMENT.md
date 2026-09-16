@@ -1,0 +1,311 @@
+# Развёртывание сервера видеонаблюдения
+
+Пошаговое руководство по установке OpenIPC NVR на чистый сервер.
+
+---
+
+## 1. Требования
+
+### Аппаратные
+
+| Ресурс | Минимум | Рекомендуется |
+|---|---|---|
+| CPU | 2 ядра | 4+ ядра |
+| ОЗУ | 2 ГБ | 8 ГБ |
+| Диск | 20 ГБ | 500 ГБ+ (зависит от глубины архива) |
+| Сеть | 100 Мбит/с | 1 Гбит/с |
+
+Расчёт диска: одна камера 1080p при 4 Мбит/с даёт около **1,8 ГБ в час**
+или **43 ГБ в сутки** непрерывной записи. Для 10 камер и архива на 30 дней
+потребуется порядка 13 ТБ — планируйте RAID или ограничивайте запись по событиям.
+
+### Программные
+
+- Linux: Ubuntu 22.04/24.04, Debian 12 (проверено на Ubuntu)
+- Docker Engine 24+ и Docker Compose v2
+- Утилита `ffmpeg` устанавливается внутри образа бэкенда, отдельно не нужна
+
+### Сеть
+
+- Камеры должны быть доступны с сервера по RTSP (порт 554)
+- Для управления по SSH — порт 22 на камерах
+- Свободные порты: 3001 (веб), 8080 (API), 8554 (RTSP), 8888 (HLS), 8889 (WebRTC), 9997 (API медиасервера)
+
+---
+
+## 2. Установка Docker
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER"
+newgrp docker          # или перелогиниться
+docker compose version # должно быть v2.x
+```
+
+---
+
+## 3. Развёртывание приложения
+
+```bash
+git clone https://github.com/himik19872/OpenIPC-NRV.git
+cd OpenIPC-NRV
+```
+
+### Настройка окружения
+
+```bash
+cp .env.example .env
+```
+
+Обязательно отредактируйте `.env`:
+
+```bash
+# Секрет для подписи JWT — сгенерируйте случайный
+JWT_SECRET=$(openssl rand -hex 32)
+
+# Пароль базы данных
+DB_PASSWORD=<надёжный пароль>
+
+# Внешний адрес сервера — нужен для ссылок на видеоархив
+MINIO_PUBLIC_ENDPOINT=192.168.1.111:9000
+```
+
+> **Важно про `MINIO_PUBLIC_ENDPOINT`.** В этом адресе клиент получает
+> временные ссылки на файлы архива. Если сервер открыт по домену, укажите
+> его: `nvr.example.com`. Иначе ссылки будут вести на `localhost` и не
+> откроются в браузере.
+
+### Запуск
+
+```bash
+./scripts/nvr.sh start
+```
+
+Скрипт покажет адреса. Откройте `http://<IP сервера>:3001`, войдите
+`admin` / `admin123` и **сразу смените пароль**.
+
+---
+
+## 4. Автозапуск при загрузке
+
+```bash
+sudo ./scripts/install-service.sh
+```
+
+Создаётся служба systemd `nvr`. Помимо этого контейнеры имеют политику
+`restart: unless-stopped` и перезапускаются после сбоев.
+
+Проверка:
+
+```bash
+systemctl is-enabled nvr    # enabled
+systemctl status nvr
+```
+
+Ручное управление службой:
+
+```bash
+sudo systemctl restart nvr
+sudo journalctl -u nvr -f
+```
+
+---
+
+## 5. Добавление камер
+
+### Автоматический поиск
+
+1. Раздел **Сканер** → укажите подсеть (например `192.168.1.0/24`).
+2. Учётные данные для перебора (по умолчанию проверяются типовые комбинации).
+3. Нажмите **Сканировать** и добавьте найденные камеры.
+
+### Ручное добавление
+
+Раздел **Камеры** → **Добавить камеру**. Заполните:
+
+| Поле | Пример | Примечание |
+|---|---|---|
+| Название | Камера вход | |
+| IP-адрес | 192.168.1.10 | Нужен для SSH-команд и снапшотов |
+| Основной поток | `rtsp://192.168.1.10/stream=0` | Для записи и полного экрана |
+| Доп. поток | `rtsp://192.168.1.10/stream=1` | Для сетки и AI-детекции |
+| Логин / Пароль | `root` / `<пароль>` | Единые для RTSP и SSH |
+| PTZ | флажок | Включить для поворотных камер |
+
+### Схемы URL потоков по производителям
+
+| Производитель | Основной поток | Доп. поток |
+|---|---|---|
+| OpenIPC / Majestic | `rtsp://IP/stream=0` | `rtsp://IP/stream=1` |
+| Hikvision | `rtsp://IP:554/Streaming/Channels/101` | `.../102` |
+| Dahua | `rtsp://IP:554/cam/realmonitor?channel=1&subtype=0` | `&subtype=1` |
+| Vivotek | `rtsp://IP:554/live.sdp` | `rtsp://IP:554/live4.sdp` |
+| ONVIF | уточняется у производителя | |
+
+---
+
+## 6. Проверка работоспособности
+
+```bash
+# Состояние службы и контейнеров
+./scripts/nvr.sh status
+
+# Сводка по API
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | jq -r .token)
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/stats | jq
+
+# Список камер и их статусы
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/cameras \
+  | jq '.[] | {name, ip, status}'
+```
+
+Проверка потока напрямую с камеры:
+
+```bash
+ffprobe -v error -rtsp_transport tcp -timeout 5000000 \
+  -i "rtsp://root:ПАРОЛЬ@192.168.1.10/stream=0" \
+  -show_entries stream=codec_name,width,height -of csv=p=0
+```
+
+Ожидаемый ответ — `h264,1920,1080`.
+
+---
+
+## 7. Резервное копирование
+
+```bash
+./scripts/nvr.sh backup     # дамп БД в ./backups/nvr_ГГГГММДД_ЧЧММСС.sql
+```
+
+Восстановление:
+
+```bash
+docker compose exec -T postgres psql -U nvr -d nvr < backups/nvr_20260916_120000.sql
+```
+
+Файлы видеоархива лежат в томе `minio_data`. Для копирования:
+
+```bash
+docker run --rm -v gigacode_minio_data:/data -v "$PWD:/backup" alpine \
+  tar czf /backup/minio_$(date +%F).tar.gz -C /data .
+```
+
+Рекомендуется добавить оба скрипта в cron.
+
+---
+
+## 8. Обновление
+
+```bash
+cd OpenIPC-NRV
+git pull
+./scripts/nvr.sh update
+```
+
+Миграции базы данных применяются автоматически при старте бэкенда.
+Перед крупным обновлением сделайте резервную копию.
+
+---
+
+## 9. Настройка TLS и внешний доступ
+
+Прямой вывод сервера в интернет **не рекомендуется**. Используйте обратный прокси.
+
+### Вариант с nginx и Let's Encrypt
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name nvr.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/nvr.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nvr.example.com/privkey.pem;
+
+    # Веб-интерфейс
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # HLS-потоки требуют отключения буферизации —
+    # иначе видео будет с задержкой в десятки секунд.
+    location /api/v1/cameras/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### Чек-лист безопасности
+
+- [ ] `JWT_SECRET` — случайный, не из примера
+- [ ] Пароль администратора изменён
+- [ ] `DB_PASSWORD` изменён
+- [ ] Порты 5434, 9000, 9001, 4222, 9997 закрыты файрволом от внешней сети
+- [ ] Настроен HTTPS
+- [ ] Учётные данные камер отличаются от заводских
+- [ ] Ограничен доступ к SSH камер (только с сервера NVR)
+
+Пример правил файрвола:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw allow 22/tcp        # SSH
+sudo ufw allow 443/tcp       # HTTPS
+sudo ufw allow 3001/tcp      # веб-интерфейс, если без прокси
+sudo ufw enable
+```
+
+---
+
+## 10. Удалённые камеры за NAT
+
+Для объектов без публичного IP штатно предусмотрен WireGuard.
+Автоматическое управление туннелями пока не реализовано (заготовка в
+`backend/internal/tunnel/wg_manager.go`), поэтому настройте пиры вручную.
+
+На сервере:
+
+```bash
+sudo apt install wireguard
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+
+sudo tee /etc/wireguard/wg0.conf <<EOF
+[Interface]
+Address = 10.99.0.1/24
+ListenPort = 51820
+PrivateKey = $(cat server_private.key)
+EOF
+
+sudo systemctl enable --now wg-quick@wg0
+```
+
+На объекте (mini-PC рядом с камерами):
+
+```ini
+[Interface]
+Address = 10.99.0.2/24
+PrivateKey = <приватный ключ объекта>
+
+[Peer]
+PublicKey = <публичный ключ сервера>
+Endpoint = <адрес сервера>:51820
+AllowedIPs = 10.99.0.0/24
+PersistentKeepalive = 25
+```
+
+После поднятия туннеля добавляйте камеры по их адресам в сети `10.99.0.0/24`,
+либо указывайте эти адреса в поле WireGuard IP.
+
+---
+
+## 11. Частые проблемы
+
+См. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — там разобраны случаи, когда
+камера числится offline, не играет видео и не работают снапшоты.

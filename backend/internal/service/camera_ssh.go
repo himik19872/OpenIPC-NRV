@@ -1,0 +1,128 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog/log"
+)
+
+// CameraSSH выполняет команды управления на камере OpenIPC по SSH.
+//
+// На камерах OpenIPC используется busybox-шелл и dropbear, поэтому
+// вместо Go-библиотеки SSH вызываем системный ssh-клиент: так мы
+// переиспользуем тот же путь, что и обычный администратор, и не
+// зависим от набора алгоритмов конкретной сборки.
+type CameraSSH struct {
+	// Timeout на подключение и выполнение команды.
+	timeout time.Duration
+}
+
+func NewCameraSSH() *CameraSSH {
+	return &CameraSSH{timeout: 20 * time.Second}
+}
+
+// CommandResult — результат выполнения команды на камере.
+type CommandResult struct {
+	Command string `json:"command"`
+	Output  string `json:"output,omitempty"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// RestartMajestic перезапускает видеопоток камеры (служба Majestic).
+// Именно этот сервис отдаёт RTSP, поэтому его перезапуск равносилен
+// "перезапустить стример камеры".
+func (c *CameraSSH) RestartMajestic(ctx context.Context, ip, username, password string) (*CommandResult, error) {
+	// reload мягче restart: перечитывает конфиг, не роняя поток надолго.
+	// Если reload не поддержан, сработает fallback на restart.
+	out, err := c.run(ctx, ip, username, password, "/etc/init.d/S95majestic reload || /etc/init.d/S95majestic restart")
+	res := &CommandResult{Command: "restart majestic"}
+	if err != nil {
+		res.Error = err.Error()
+		return res, err
+	}
+	res.Output = out
+	res.Success = true
+	return res, nil
+}
+
+// Reboot перезагружает камеру.
+func (c *CameraSSH) Reboot(ctx context.Context, ip, username, password string) (*CommandResult, error) {
+	// sync перед reboot, чтобы не потерять записанные настройки.
+	out, err := c.run(ctx, ip, username, password, "sync; sleep 1; /sbin/reboot &")
+	res := &CommandResult{Command: "reboot"}
+	if err != nil {
+		// Обрыв соединения при перезагрузке — нормальное поведение,
+		// камера уходит в reboot до ответа.
+		log.Info().Str("ip", ip).Err(err).Msg("reboot command connection closed (expected)")
+		res.Output = out
+		res.Success = true
+		return res, nil
+	}
+	res.Output = out
+	res.Success = true
+	return res, nil
+}
+
+// run выполняет одну команду на камере через ssh.
+func (c *CameraSSH) run(ctx context.Context, ip, username, password, command string) (string, error) {
+	if ip == "" {
+		return "", fmt.Errorf("camera has no IP address")
+	}
+	if username == "" {
+		username = "root"
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	// StrictHostKeyChecking=no + UserKnownHostsFile=/dev/null: камеры в сети
+	// меняются и переустанавливаются, хост-ключи не должны блокировать управление.
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=8",
+		"-o", "LogLevel=ERROR",
+	}
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", username, ip), command)
+
+	var cmd *exec.Cmd
+	if password != "" {
+		if _, err := exec.LookPath("sshpass"); err != nil {
+			return "", fmt.Errorf("sshpass not installed, cannot authenticate with password")
+		}
+		// Пароль передаём через переменную окружения SSHPASS (флаг -e),
+		// а не в argv — чтобы он не был виден в списке процессов.
+		cmd = exec.CommandContext(ctx, "sshpass", append([]string{"-e", "ssh"}, sshArgs...)...)
+		cmd.Env = append(cmd.Environ(), "SSHPASS="+password)
+	} else {
+		cmd = exec.CommandContext(ctx, "ssh",
+			append([]string{"-o", "BatchMode=yes"}, sshArgs...)...)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out := strings.TrimSpace(stdout.String())
+	if errStr := strings.TrimSpace(stderr.String()); errStr != "" {
+		if out != "" {
+			out += "\n"
+		}
+		out += errStr
+	}
+
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return out, fmt.Errorf("command timed out after %s", c.timeout)
+		}
+		return out, fmt.Errorf("ssh command failed: %v", err)
+	}
+	return out, nil
+}

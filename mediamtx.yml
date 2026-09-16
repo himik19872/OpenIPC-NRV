@@ -1,0 +1,29 @@
+api: yes
+apiAddress: :9997
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: api
+      - action: read
+      - action: publish
+      - action: playback
+hls: true
+hlsAddress: :8888
+hlsAllowOrigins: ["*"]
+# fmp4 (а не mpegts) — устойчив к B-кадрам и потерям пакетов с камер.
+hlsVariant: fmp4
+hlsAlwaysRemux: true
+# Сегмент 1s + hlsAlwaysRemux заставляли муксер пересоздаваться каждую секунду
+# и падать с "unable to extract DTS: too many reordered frames".
+# 2s — безопасный компромисс между задержкой и стабильностью.
+hlsSegmentDuration: 2s
+hlsPartDuration: 500ms
+hlsSegmentCount: 5
+# Плейлист считается готовым после накопления сегментов; 0 = отдавать сразу,
+# не дожидаясь заполнения всего окна (иначе первый запрос висит).
+hlsMuxerCloseAfter: 60s
+# Пути камер регистрируются автоматически бэкендом через API
+# (POST /v3/config/paths/add/{uuid}) и удаляются при удалении камеры.
+paths:

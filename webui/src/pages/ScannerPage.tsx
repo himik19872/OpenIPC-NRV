@@ -1,0 +1,186 @@
+import { useState } from 'react'
+import { scannerAPI, camerasAPI, type DiscoveredCamera, type ScanResult } from '../api/client'
+import { useToast } from '../context/ToastContext'
+import { Search, Wifi, Plus, Check, Loader2, Camera } from 'lucide-react'
+
+export default function ScannerPage() {
+  const toast = useToast()
+  const [subnet, setSubnet] = useState('192.168.1.0/24')
+  const [username, setUsername] = useState('root')
+  const [password, setPassword] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [result, setResult] = useState<ScanResult | null>(null)
+  const [adding, setAdding] = useState<Set<string>>(new Set())
+  const [added, setAdded] = useState<Set<string>>(new Set())
+
+  const handleScan = async () => {
+    setScanning(true)
+    setResult(null)
+    try {
+      const res = await scannerAPI.scan(subnet, username, password)
+      setResult(res.data)
+      toast.success(`Найдено камер: ${res.data.found}`)
+    } catch (err: any) {
+      toast.error(err.response?.data?.error || 'Ошибка сканирования')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const handleAdd = async (cam: DiscoveredCamera) => {
+    setAdding((s) => new Set(s).add(cam.ip))
+    try {
+      await camerasAPI.create({
+        name: `Камера ${cam.ip}`,
+        main_stream: cam.main_stream,
+        sub_stream: cam.sub_stream,
+        ip: cam.ip,
+        mac: cam.mac,
+        firmware: cam.firmware,
+        username,
+        password,
+      })
+      setAdded((s) => new Set(s).add(cam.ip))
+      toast.success(`Камера ${cam.ip} добавлена`)
+    } catch (err: any) {
+      toast.error(`Ошибка: ${err.response?.data?.error || err.message}`)
+    } finally {
+      setAdding((s) => {
+        const ns = new Set(s)
+        ns.delete(cam.ip)
+        return ns
+      })
+    }
+  }
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Сканер камер</h1>
+          <p>Поиск OpenIPC-камер в локальной сети</p>
+        </div>
+      </div>
+
+      {/* Форма сканирования */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>
+              Подсеть
+            </label>
+            <input
+              value={subnet}
+              onChange={(e) => setSubnet(e.target.value)}
+              placeholder="192.168.1.0/24"
+            />
+          </div>
+          <div style={{ width: 140 }}>
+            <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>
+              Логин
+            </label>
+            <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" />
+          </div>
+          <div style={{ width: 160 }}>
+            <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>
+              Пароль
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+            />
+          </div>
+          <button className="btn btn-primary" onClick={handleScan} disabled={scanning}>
+            {scanning ? (
+              <><Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} /> Сканирую...</>
+            ) : (
+              <><Search size={16} /> Сканировать</>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Результаты */}
+      {scanning && (
+        <div className="card" style={{ textAlign: 'center', padding: 40 }}>
+          <Loader2 size={32} style={{ animation: 'spin 0.8s linear infinite', color: 'var(--accent)', marginBottom: 12 }} />
+          <p style={{ color: 'var(--text-secondary)' }}>Сканирование сети {subnet}...</p>
+        </div>
+      )}
+
+      {result && !scanning && (
+        <div className="card" style={{ padding: 0 }}>
+          <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontWeight: 600 }}>Результаты:</span>{' '}
+            <span style={{ color: 'var(--success)' }}>{result.found} камер</span> найдено из{' '}
+            {result.total} проверенных IP
+          </div>
+
+          {(!result.cameras || result.cameras.length === 0) ? (
+            <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-secondary)' }}>
+              <Wifi size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
+              <p>Камеры OpenIPC не найдены в подсети {subnet}</p>
+              <p style={{ fontSize: 13, marginTop: 8 }}>Проверьте подсеть и учётные данные</p>
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>IP</th>
+                    <th>Модель</th>
+                    <th>Прошивка</th>
+                    <th>MAC</th>
+                    <th>Потоки</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(result.cameras || []).map((cam) => (
+                    <tr key={cam.ip}>
+                      <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span className="badge-dot badge-dot-online" style={{ width: 8, height: 8 }} />
+                          {cam.ip}
+                        </span>
+                      </td>
+                      <td>{cam.model || '—'}</td>
+                      <td style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{cam.firmware || '—'}</td>
+                      <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{cam.mac || '—'}</td>
+                      <td style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                        main + sub
+                      </td>
+                      <td>
+                        {added.has(cam.ip) ? (
+                          <span className="badge badge-online">
+                            <Check size={14} />
+                            Добавлена
+                          </span>
+                        ) : (
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => handleAdd(cam)}
+                            disabled={adding.has(cam.ip)}
+                          >
+                            {adding.has(cam.ip) ? (
+                              <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                            ) : (
+                              <Plus size={14} />
+                            )}
+                            Добавить
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
