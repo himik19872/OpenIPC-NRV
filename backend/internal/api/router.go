@@ -99,6 +99,10 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 		// построить интеграцию до получения учётных данных.
 		r.Get("/docs", docsH.List)
 
+		// СКУД: приём событий от контроллеров (push-канал).
+		// Контроллер не умеет JWT, авторизуется по IP отправителя.
+		r.Post("/acs/ingest", acsH.IngestEvent)
+
 		// HLS-прокси: вне JWT-группы, т.к. hls.js в браузере
 		// не может передавать Authorization-заголовок для сегментов.
 		// Авторизация проверяется внутри ProxyHLS по ?token= query-параметру.

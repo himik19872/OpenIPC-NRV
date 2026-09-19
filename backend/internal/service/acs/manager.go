@@ -47,6 +47,7 @@ func NewManager(repo *postgres.ACSRepo) *Manager {
 	m.Register("hikvision", NewHikvisionAdapter)
 	m.Register("dahua", NewDahuaAdapter)
 	m.Register("promwad", NewPromwadAdapter)
+	m.Register("skud", NewSkudAdapter)
 
 	return m
 }

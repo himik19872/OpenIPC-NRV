@@ -120,3 +120,24 @@ func (h *ACSHandler) OpenDoor(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// IngestEvent — приём события от контроллера (push-канал).
+// Публичный эндпоинт: контроллер не умеет JWT, авторизуется по IP.
+func (h *ACSHandler) IngestEvent(w http.ResponseWriter, r *http.Request) {
+	var req domain.IngestACSEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if req.EventType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "event_type required"})
+		return
+	}
+
+	controllerIP := clientIP(r)
+	if _, err := h.svc.IngestEvent(r.Context(), req, controllerIP); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+}

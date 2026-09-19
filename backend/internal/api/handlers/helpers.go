@@ -45,3 +45,19 @@ func credentialsFromSettings(settings map[string]any) (string, string) {
 	password, _ := settings["password"].(string)
 	return username, password
 }
+
+// clientIP возвращает IP клиента (учитывая X-Forwarded-For / X-Real-IP,
+// которые выставляет RealIP middleware).
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+		return ip
+	}
+	host := r.RemoteAddr
+	// Отрезаем порт (формат "ip:port").
+	for i := len(host) - 1; i >= 0; i-- {
+		if host[i] == ':' {
+			return host[:i]
+		}
+	}
+	return host
+}

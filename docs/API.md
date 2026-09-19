@@ -365,6 +365,7 @@ GET    /api/v1/acs/controllers/{id}
 DELETE /api/v1/acs/controllers/{id}
 GET    /api/v1/acs/events?page=1&page_size=20
 POST   /api/v1/acs/doors/{controllerID}/open     {"door_id": "1"}
+POST   /api/v1/acs/ingest                        (публично, приём событий от контроллера)
 ```
 
 Создание контроллера:
@@ -372,15 +373,38 @@ POST   /api/v1/acs/doors/{controllerID}/open     {"door_id": "1"}
 ```json
 {
   "name": "Турникет главного входа",
-  "vendor": "hikvision",
+  "vendor": "skud",
   "ip": "192.168.1.50",
   "port": 80,
-  "username": "admin",
+  "login": "admin",
   "password": "secret"
 }
 ```
 
-Поддерживаемые значения `vendor`: `hikvision`, `dahua`, `promwad`.
+Поддерживаемые значения `vendor`: `hikvision`, `dahua`, `promwad`, `skud`.
+
+### Приём событий от контроллера (ingest)
+
+Публичный эндпоинт для push-событий от контроллера SKUD (ESP32-P4).
+Контроллер присылает JSON; сопоставление с контроллером — по IP отправителя.
+
+```json
+POST /api/v1/acs/ingest
+{
+  "device_id": "SKUD-01",
+  "event_type": "access_granted",
+  "facility": 0,
+  "card_number": "12345",
+  "name": "Иванов Иван",
+  "timestamp": 1789857349,
+  "flags": 1
+}
+```
+
+Ответ: `201 {"status":"ok"}`.
+
+Прошивка и полное описание API самого контроллера — в
+[`firmware/skud-esp32-p4/`](../../firmware/skud-esp32-p4/README.md).
 
 ---
 

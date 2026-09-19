@@ -177,6 +177,7 @@ export default function ACSPage() {
                 <option value="hikvision">Hikvision</option>
                 <option value="dahua">Dahua</option>
                 <option value="promwad">Promwad</option>
+                <option value="skud">SKUD (ESP32-P4)</option>
               </select>
 
               <label>IP-адрес</label>

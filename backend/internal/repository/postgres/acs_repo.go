@@ -63,6 +63,27 @@ func (r *ACSRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.ACSControl
 	return &c, nil
 }
 
+// FindByIP возвращает первый контроллер с заданным IP (для ingest).
+func (r *ACSRepo) FindByIP(ctx context.Context, ip string) (*domain.ACSController, error) {
+	var c domain.ACSController
+	var cfg, creds []byte
+	err := r.db.QueryRow(ctx, `
+		SELECT id, name, vendor, ip, port, credentials, site_id, status, config, created_at
+		FROM acs_controllers WHERE ip = $1 LIMIT 1
+	`, ip).Scan(&c.ID, &c.Name, &c.Vendor, &c.IP, &c.Port,
+		&creds, &c.SiteID, &c.Status, &cfg, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		json.Unmarshal(cfg, &c.Config)
+	}
+	if creds != nil {
+		json.Unmarshal(creds, &c.Credentials)
+	}
+	return &c, nil
+}
+
 func (r *ACSRepo) Create(ctx context.Context, c *domain.ACSController) error {
 	creds, _ := json.Marshal(c.Credentials)
 	cfg, _ := json.Marshal(c.Config)
@@ -75,6 +96,19 @@ func (r *ACSRepo) Create(ctx context.Context, c *domain.ACSController) error {
 
 func (r *ACSRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM acs_controllers WHERE id = $1`, id)
+	return err
+}
+
+// SaveEvent сохраняет событие СКУД (пришло от контроллера через ingest/push).
+func (r *ACSRepo) SaveEvent(ctx context.Context, e *domain.ACSEvent) error {
+	meta, _ := json.Marshal(e.Metadata)
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO acs_events
+			(id, controller_id, door_id, event_type, card_number, user_id,
+			 timestamp, camera_id, snapshot_path, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, e.ID, e.ControllerID, e.DoorID, e.EventType, e.CardNumber, e.UserID,
+		e.Timestamp, e.CameraID, e.SnapshotPath, meta)
 	return err
 }
 

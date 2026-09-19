@@ -524,7 +524,7 @@ type ScanResult struct {
 
 type CreateACSControllerRequest struct {
 	Name     string `json:"name" validate:"required"`
-	Vendor   string `json:"vendor" validate:"required,oneof=hikvision dahua promwad"`
+	Vendor   string `json:"vendor" validate:"required,oneof=hikvision dahua promwad skud"`
 	IP       string `json:"ip" validate:"required,ip"`
 	Port     int    `json:"port" validate:"min=1,max=65535"`
 	Login    string `json:"login"`
@@ -545,6 +545,20 @@ type LoginResponse struct {
 
 type OpenDoorRequest struct {
 	DoorID string `json:"door_id" validate:"required"`
+}
+
+// IngestACSEventRequest — событие, которое контроллер СКУД пушит на сервер.
+// Соответствует формату event_push компонента прошивки skud-esp32-p4.
+type IngestACSEventRequest struct {
+	DeviceID   string         `json:"device_id"`
+	EventType  string         `json:"event_type"`
+	Facility   int            `json:"facility"`
+	CardNumber string         `json:"card_number"`
+	Name       string         `json:"name"`
+	DoorID     string         `json:"door_id"`
+	Timestamp  int64          `json:"timestamp"`
+	Flags      int            `json:"flags"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 // PaginatedEventResponse — пагинированный список событий

@@ -69,6 +69,52 @@ func (s *ACSService) ListEvents(ctx context.Context, page, pageSize int) ([]doma
 	return s.repo.ListEvents(ctx, page, pageSize)
 }
 
+// IngestEvent сохраняет событие, пришедшее от контроллера (push-канал).
+// ControllerIP — IP контроллера, по которому он сопоставляется с записью в БД.
+func (s *ACSService) IngestEvent(ctx context.Context, req domain.IngestACSEventRequest, controllerIP string) (*domain.ACSEvent, error) {
+	ev := &domain.ACSEvent{
+		ID:         uuid.New(),
+		DoorID:     req.DoorID,
+		EventType:  req.EventType,
+		CardNumber: req.CardNumber,
+		Metadata:   req.Metadata,
+	}
+	if ev.DoorID == "" {
+		ev.DoorID = "door_1"
+	}
+	// Сопоставление события с контроллером по IP отправителя.
+	if ctrl, err := s.repo.FindByIP(ctx, controllerIP); err == nil {
+		ev.ControllerID = ctrl.ID
+	}
+
+	if ev.Metadata == nil {
+		ev.Metadata = map[string]any{}
+	}
+	if req.Facility != 0 {
+		ev.Metadata["facility"] = req.Facility
+	}
+	if req.Name != "" {
+		ev.Metadata["name"] = req.Name
+	}
+	if req.Flags != 0 {
+		ev.Metadata["flags"] = req.Flags
+	}
+	if req.DeviceID != "" {
+		ev.Metadata["device_id"] = req.DeviceID
+	}
+
+	if req.Timestamp != 0 {
+		ev.Timestamp = time.Unix(req.Timestamp, 0)
+	} else {
+		ev.Timestamp = time.Now()
+	}
+
+	if err := s.repo.SaveEvent(ctx, ev); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
 func (s *ACSService) OpenDoor(ctx context.Context, controllerID uuid.UUID, doorID string) error {
 	ctrl, err := s.repo.GetByID(ctx, controllerID)
 	if err != nil {
