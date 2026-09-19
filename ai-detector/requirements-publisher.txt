@@ -1,0 +1,5 @@
+# Зависимости сервиса публикации кадров (frame_publisher_service.py).
+# Отдельный файл от requirements.txt: публикатору НЕ нужны torch и ultralytics,
+# поэтому его образ весит десятки мегабайт вместо гигабайтов.
+nats-py>=2.6.0
+psycopg2-binary==2.9.9

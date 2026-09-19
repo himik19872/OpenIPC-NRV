@@ -97,16 +97,70 @@ func buildRouteList() []APIDoc {
 		{Method: "POST", Path: "/api/v1/cameras/{id}/restart-streamer", Summary: "Перезапустить стример камеры (Majestic, SSH)", Auth: true, Tags: []string{"control"}},
 		{Method: "POST", Path: "/api/v1/cameras/{id}/reboot", Summary: "Перезагрузить камеру (SSH)", Auth: true, Tags: []string{"control"}},
 
+		// --- Настройки AI-детекции ---
+		{Method: "GET", Path: "/api/v1/cameras/{id}/detection", Summary: "Настройки детекции камеры", Auth: true, Tags: []string{"detection"}},
+		{Method: "PATCH", Path: "/api/v1/cameras/{id}/detection", Summary: "Обновить настройки детекции (частично)", Auth: true, Tags: []string{"detection"},
+			Body: `{"enabled":true,"object_classes":["person","car"],"min_confidence":0.5,` +
+				`"detect_types":["object","line"],"line":[{"x":0.2,"y":0.5},{"x":0.8,"y":0.5}],` +
+				`"line_direction":"both","save_snapshots":true,"record_mode":"event",` +
+				`"prebuffer_sec":10,"postbuffer_sec":20,"cooldown_sec":30}`},
+
+		// --- Настройки сервера ---
+		{Method: "GET", Path: "/api/v1/settings", Summary: "Глобальные настройки: хранилище записей и снимков", Auth: true, Tags: []string{"settings"}},
+		{Method: "PATCH", Path: "/api/v1/settings", Summary: "Обновить настройки сервера (частично)", Auth: true, Tags: []string{"settings"},
+			Body: `{"storage":{"backend":"minio","local_path":"/var/lib/nvr/recordings","retention_days":30}}`},
+
+		// Детектор читает эти настройки и применяет их при обработке кадров:
+		// выключенные камеры пропускаются, объекты фильтруются по классам,
+		// порогу, зоне и линии; снимки сохраняются в выбранное хранилище.
+
 		// --- События детекции ---
 		{Method: "GET", Path: "/api/v1/events", Summary: "События AI-детекции с пагинацией", Auth: true, Tags: []string{"events"},
 			QueryParams: []string{"camera_id", "page", "page_size"}},
 		{Method: "GET", Path: "/api/v1/events/{id}", Summary: "Детали события", Auth: true, Tags: []string{"events"}},
+		{Method: "GET", Path: "/api/v1/events/{id}/snapshot", Summary: "Снимок события (редирект в MinIO или файл)", Auth: false, Tags: []string{"events"},
+			QueryParams: []string{"jwt"}},
 
 		// --- Архив записей ---
 		{Method: "GET", Path: "/api/v1/recordings", Summary: "Список записей со ссылками на файлы", Auth: true, Tags: []string{"recordings"},
-			QueryParams: []string{"camera_id", "page", "page_size"}},
+			QueryParams: []string{"camera_id", "trigger", "search", "page", "page_size"}},
 		{Method: "GET", Path: "/api/v1/recordings/{id}", Summary: "Запись с presigned-ссылкой на файл", Auth: true, Tags: []string{"recordings"}},
 		{Method: "DELETE", Path: "/api/v1/recordings/{id}", Summary: "Удалить запись и её файл из хранилища", Auth: true, Tags: []string{"recordings"}},
+		{Method: "GET", Path: "/api/v1/recordings/file", Summary: "Файл записи с локального диска (для тега <video>)", Auth: false, Tags: []string{"recordings"},
+			QueryParams: []string{"path", "jwt"}},
+
+		// --- Распознавание лиц и автомобильных номеров ---
+		// Справочники позволяют отличать «своих» от посторонних: событие
+		// сопоставляется со списком, результат попадает в detection_events
+		// и в trigger_detail записи архива.
+
+		{Method: "GET", Path: "/api/v1/faces", Summary: "Справочник известных лиц", Auth: true, Tags: []string{"recognition"},
+			QueryParams: []string{"all"}},
+		{Method: "POST", Path: "/api/v1/faces", Summary: "Добавить лицо в справочник", Auth: true, Tags: []string{"recognition"},
+			Body: `{"name":"Иванов Иван","note":"Отдел охраны","is_blocked":false,` +
+				`"embedding":[0.12,-0.03],"photo_base64":"<JPEG в base64>"}`},
+		{Method: "PATCH", Path: "/api/v1/faces/{id}", Summary: "Изменить запись справочника лиц", Auth: true, Tags: []string{"recognition"},
+			Body: `{"name":"Иванов И.И.","is_blocked":true,"enabled":true}`},
+		{Method: "DELETE", Path: "/api/v1/faces/{id}", Summary: "Удалить лицо из справочника", Auth: true, Tags: []string{"recognition"}},
+		{Method: "GET", Path: "/api/v1/faces/{id}/photo", Summary: "Эталонный снимок лица (JPEG)", Auth: false, Tags: []string{"recognition"}},
+
+		{Method: "GET", Path: "/api/v1/plates", Summary: "Справочник известных номеров", Auth: true, Tags: []string{"recognition"},
+			QueryParams: []string{"all"}},
+		{Method: "POST", Path: "/api/v1/plates", Summary: "Добавить номер в справочник", Auth: true, Tags: []string{"recognition"},
+			Body: `{"plate":"А123ВС77","owner":"ООО Ромашка","note":"Белый фургон","is_blocked":false}`},
+		{Method: "PATCH", Path: "/api/v1/plates/{id}", Summary: "Изменить запись справочника номеров", Auth: true, Tags: []string{"recognition"},
+			Body: `{"plate":"В456ОР199","is_blocked":true}`},
+		{Method: "DELETE", Path: "/api/v1/plates/{id}", Summary: "Удалить номер из справочника", Auth: true, Tags: []string{"recognition"}},
+		{Method: "GET", Path: "/api/v1/plates/{id}/photo", Summary: "Снимок автомобиля (JPEG)", Auth: false, Tags: []string{"recognition"}},
+
+		{Method: "GET", Path: "/api/v1/settings/recognition", Summary: "Настройки распознавания лиц и номеров", Auth: true, Tags: []string{"recognition"}},
+		{Method: "PATCH", Path: "/api/v1/settings/recognition", Summary: "Обновить настройки распознавания", Auth: true, Tags: []string{"recognition"},
+			Body: `{"faces":{"enabled":true,"threshold":0.45,"alert_blocked":true},` +
+				`"plates":{"enabled":true,"threshold":0.75,"region":"ru","alert_blocked":true}}`},
+		{Method: "GET", Path: "/api/v1/recognition/stats", Summary: "Размеры справочников лиц и номеров", Auth: true, Tags: []string{"recognition"}},
+
+		// Номер сравнивается по нормализованному виду: «а123вс-77» и «А123ВС77»
+		// считаются одним и тем же номером.
 
 		// --- СКУД ---
 		{Method: "GET", Path: "/api/v1/acs/controllers", Summary: "Список контроллеров СКУД", Auth: true, Tags: []string{"acs"}},

@@ -50,6 +50,10 @@ type DetectionEvent struct {
 	SnapshotPath  string             `json:"snapshot_path,omitempty"`
 	ThumbnailPath string             `json:"thumbnail_path,omitempty"`
 	Metadata      map[string]any     `json:"metadata,omitempty"`
+	// Результат сравнения со справочником известных лиц и номеров.
+	MatchType   MatchType  `json:"match_type"`
+	MatchedID   *uuid.UUID `json:"matched_id,omitempty"`
+	MatchedName string     `json:"matched_name,omitempty"`
 }
 
 // ACSEvent — событие СКУД
@@ -82,17 +86,25 @@ type ACSController struct {
 
 // Recording — запись видео
 type Recording struct {
-	ID             uuid.UUID      `json:"id"`
-	CameraID       uuid.UUID      `json:"camera_id"`
-	StartTime      time.Time      `json:"start_time"`
-	EndTime        time.Time      `json:"end_time"`
-	Duration       float64        `json:"duration_sec"`
-	FilePath       string         `json:"file_path"`
-	FileSize       int64          `json:"file_size"`
-	Resolution     string         `json:"resolution,omitempty"`
-	Codec          string         `json:"codec,omitempty"`
-	EventTriggered bool           `json:"event_triggered"`
-	Metadata       map[string]any `json:"metadata,omitempty"`
+	ID         uuid.UUID `json:"id"`
+	CameraID   uuid.UUID `json:"camera_id"`
+	CameraName string    `json:"camera_name,omitempty"`
+	StartTime  time.Time `json:"start_time"`
+	EndTime    time.Time `json:"end_time"`
+	// В API поле называется duration (см. handlers/recordings.go),
+	// тег оставлен для обратной совместимости старых клиентов.
+	Duration       float64 `json:"duration_sec"`
+	FilePath       string  `json:"file_path"`
+	FileSize       int64   `json:"file_size"`
+	Resolution     string  `json:"resolution,omitempty"`
+	Codec          string  `json:"codec,omitempty"`
+	EventTriggered bool    `json:"event_triggered"`
+	// TriggerType — что вызвало запись: manual, always, object, line, face, plate.
+	// Без этого в архиве неясно, почему запись появилась.
+	TriggerType TriggerType `json:"trigger_type"`
+	// TriggerDetail — расшифровка триггера: класс объекта, имя человека, номер авто.
+	TriggerDetail string         `json:"trigger_detail,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // User — пользователь системы
@@ -107,6 +119,350 @@ type User struct {
 
 // --- Входные DTO ---
 
+// --- Настройки AI-детекции ---
+
+// Point — точка в нормализованных координатах кадра (0..1)
+type Point struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// DetectionSettings — настройки детекции для одной камеры.
+type DetectionSettings struct {
+	CameraID uuid.UUID `json:"camera_id"`
+	Enabled  bool      `json:"enabled"`
+	// Классы объектов COCO: person, car, truck, bus, motorcycle, bicycle...
+	ObjectClasses []string `json:"object_classes"`
+	MinConfidence float64  `json:"min_confidence"`
+	// DetectTypes: object, line, face, plate
+	DetectTypes []string `json:"detect_types"`
+	// Zone — полигон зоны детекции; пустой = весь кадр
+	Zone []Point `json:"zone"`
+	// Line — линия для подсчёта пересечений (2 точки); пустая = выключено
+	Line          []Point `json:"line"`
+	LineDirection string  `json:"line_direction"` // both, forward, backward
+	SaveSnapshots bool    `json:"save_snapshots"`
+	RecordMode    string  `json:"record_mode"` // off, always, event
+	PrebufferSec  int     `json:"prebuffer_sec"`
+	PostbufferSec int     `json:"postbuffer_sec"`
+	CooldownSec   int     `json:"cooldown_sec"`
+	// PlateZone — область поиска номеров (полигон в 0..1).
+	// Нужна, чтобы OCR не хватал OSD-меню камеры и надписи в углах кадра.
+	PlateZone []Point `json:"plate_zone"`
+	// Правила проверки формата номера: длина и шаблон допустимых символов.
+	// Отсекают мусор вида «COMOTO», который OCR принимает за номер.
+	PlateMinLength     int       `json:"plate_min_length"`
+	PlateMaxLength     int       `json:"plate_max_length"`
+	PlatePattern       string    `json:"plate_pattern"`
+	PlateMinConfidence float64   `json:"plate_min_confidence"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// UpdateDetectionSettingsRequest — частичное обновление настроек детекции.
+// Все поля указатели, чтобы отличать «не передано» от «передать false/0».
+type UpdateDetectionSettingsRequest struct {
+	Enabled            *bool    `json:"enabled,omitempty"`
+	ObjectClasses      []string `json:"object_classes,omitempty"`
+	MinConfidence      *float64 `json:"min_confidence,omitempty"`
+	DetectTypes        []string `json:"detect_types,omitempty"`
+	Zone               []Point  `json:"zone,omitempty"`
+	Line               []Point  `json:"line,omitempty"`
+	LineDirection      *string  `json:"line_direction,omitempty"`
+	SaveSnapshots      *bool    `json:"save_snapshots,omitempty"`
+	RecordMode         *string  `json:"record_mode,omitempty"`
+	PrebufferSec       *int     `json:"prebuffer_sec,omitempty"`
+	PostbufferSec      *int     `json:"postbuffer_sec,omitempty"`
+	CooldownSec        *int     `json:"cooldown_sec,omitempty"` // Настройки распознавания номеров
+	PlateZone          []Point  `json:"plate_zone,omitempty"`
+	PlateMinLength     *int     `json:"plate_min_length,omitempty"`
+	PlateMaxLength     *int     `json:"plate_max_length,omitempty"`
+	PlatePattern       *string  `json:"plate_pattern,omitempty"`
+	PlateMinConfidence *float64 `json:"plate_min_confidence,omitempty"`
+}
+
+// StorageConfig — куда складывать записи и снимки.
+type StorageConfig struct {
+	// Backend: minio (S3) или local (локальный диск)
+	Backend       string `json:"backend"`
+	LocalPath     string `json:"local_path"`
+	RetentionDays int    `json:"retention_days"`
+}
+
+// ServerSettings — глобальные настройки сервера.
+type ServerSettings struct {
+	Storage   StorageConfig `json:"storage"`
+	Snapshots StorageConfig `json:"snapshots"`
+}
+
+// --- Звук с камер ---
+
+// AudioSettings — настройки звука для одной камеры.
+type AudioSettings struct {
+	CameraID uuid.UUID `json:"camera_id"`
+	// HasMicrophone — есть ли у камеры микрофон. Если нет, транскодирование
+	// звука не запускается: это экономит ресурсы на камерах без звука.
+	HasMicrophone bool `json:"has_microphone"`
+	// Enabled — включать ли звук в плеере по умолчанию.
+	Enabled bool `json:"enabled"`
+	// Volume — уровень громкости по умолчанию (0..1).
+	Volume float64 `json:"volume"`
+	// SourceCodec — исходный кодек камеры: auto, g711, opus, aac.
+	SourceCodec string `json:"source_codec"`
+	// Transcode — нужно ли перекодировать звук в AAC для браузера.
+	Transcode bool `json:"transcode"`
+	// DetectAudio — включена ли детекция звуковых событий.
+	DetectAudio bool `json:"detect_audio"`
+	// AudioEvents — классы звуков для поиска (крик, выстрел, стекло).
+	AudioEvents []string `json:"audio_events"`
+	// AudioThreshold — порог уверенности аудиодетекции (0..1).
+	AudioThreshold float64 `json:"audio_threshold"`
+	// SpeakerEnabled — разрешена ли передача звука на камеру (динамик).
+	SpeakerEnabled bool `json:"speaker_enabled"`
+	// SpeakerCodec — кодек для передачи звука на камеру (g711, aac).
+	SpeakerCodec string    `json:"speaker_codec"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// UpdateAudioSettingsRequest — частичное обновление настроек звука.
+type UpdateAudioSettingsRequest struct {
+	HasMicrophone  *bool    `json:"has_microphone,omitempty"`
+	Enabled        *bool    `json:"enabled,omitempty"`
+	Volume         *float64 `json:"volume,omitempty"`
+	SourceCodec    *string  `json:"source_codec,omitempty"`
+	Transcode      *bool    `json:"transcode,omitempty"`
+	DetectAudio    *bool    `json:"detect_audio,omitempty"`
+	AudioEvents    []string `json:"audio_events,omitempty"`
+	AudioThreshold *float64 `json:"audio_threshold,omitempty"`
+	SpeakerEnabled *bool    `json:"speaker_enabled,omitempty"`
+	SpeakerCodec   *string  `json:"speaker_codec,omitempty"`
+}
+
+// AudioEvent — событие аудиодетекции (звук, речь).
+type AudioEvent struct {
+	ID          uuid.UUID `json:"id"`
+	CameraID    uuid.UUID `json:"camera_id"`
+	CameraName  string    `json:"camera_name,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	EventClass  string    `json:"event_class"`
+	Confidence  float64   `json:"confidence"`
+	LoudnessDB  *float64  `json:"loudness_db,omitempty"`
+	DurationSec *float64  `json:"duration_sec,omitempty"`
+	// Transcript — распознанный текст (для речевых событий).
+	Transcript string         `json:"transcript,omitempty"`
+	ClipPath   string         `json:"clip_path,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+// AudioStatus — сведения о состоянии звука камеры (для интерфейса).
+type AudioStatus struct {
+	CameraID uuid.UUID `json:"camera_id"`
+	// Available — есть ли у камеры звуковая дорожка.
+	Available bool `json:"available"`
+	// Codec — исходный кодек, определённый автоматически.
+	Codec string `json:"codec,omitempty"`
+	// Transcoding — идёт ли сейчас перекодирование.
+	Transcoding bool `json:"transcoding"`
+	// HLSHasAudio — есть ли звук в HLS-потоке для браузера.
+	HLSHasAudio bool `json:"hls_has_audio"`
+	// AudioPath — имя пути MediaMTX с готовым для браузера звуком.
+	AudioPath string `json:"audio_path,omitempty"`
+	// Backchannel — умеет ли камера принимать звук на динамик.
+	// Ложь означает, что двусторонняя связь с этой камерой невозможна
+	// аппаратно, и кнопку разговора показывать не нужно.
+	Backchannel bool `json:"backchannel"`
+	// Talking — идёт ли прямо сейчас передача звука на камеру.
+	Talking bool `json:"talking"`
+}
+
+// AudioClasses — классы звуков, которые умеет различать аудиомодель.
+// Используются в интерфейсе как список для выбора.
+var AudioClasses = []struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}{
+	{"speech", "Речь"},
+	{"shout", "Крик"},
+	{"scream", "Вопль"},
+	{"gunshot", "Выстрел"},
+	{"glass_break", "Разбитое стекло"},
+	{"explosion", "Взрыв"},
+	{"dog", "Лай собаки"},
+	{"car_alarm", "Автосигнализация"},
+	{"alarm", "Сирена"},
+	{"music", "Музыка"},
+}
+
+// ExpiredItem — запись архива, подлежащая удалению по глубине хранения.
+type ExpiredItem struct {
+	ID   string
+	Path string
+}
+
+// --- Распознавание лиц и автомобильных номеров ---
+
+// MatchType — результат сравнения события со справочником.
+type MatchType string
+
+const (
+	// MatchUnknown — совпадений в справочнике нет.
+	MatchUnknown MatchType = "unknown"
+	// MatchKnown — найден в справочнике, не заблокирован.
+	MatchKnown MatchType = "known"
+	// MatchBlocked — найден и помечен как заблокированный.
+	MatchBlocked MatchType = "blocked"
+)
+
+// MatchResult — итог сопоставления со справочником.
+//
+// Объявлен в domain, а не в пакете nats или service: тип используется
+// обоими, и общий домен избавляет от дублирования и лишних адаптеров.
+type MatchResult struct {
+	Type MatchType `json:"type"`
+	ID   uuid.UUID `json:"id,omitempty"`
+	Name string    `json:"name,omitempty"`
+}
+
+// KnownFace — запись справочника известных лиц.
+type KnownFace struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+	Note string    `json:"note"`
+	// PhotoPath — эталонный снимок для показа оператору.
+	PhotoPath string    `json:"photo_path,omitempty"`
+	IsBlocked bool      `json:"is_blocked"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// PhotoURL заполняется только в ответе API — ссылка на снимок.
+	PhotoURL string `json:"photo_url,omitempty"`
+	// HasEmbedding показывает, участвует ли лицо в распознавании.
+	// false означает «снимок есть, но биометрия не рассчитана».
+	HasEmbedding bool `json:"has_embedding"`
+}
+
+// KnownPlate — запись справочника известных автомобильных номеров.
+type KnownPlate struct {
+	ID uuid.UUID `json:"id"`
+	// Plate — номер в том виде, как его ввёл пользователь.
+	Plate string `json:"plate"`
+	// PlateNorm — нормализованный вид, по нему идёт сравнение.
+	PlateNorm string    `json:"plate_norm"`
+	Owner     string    `json:"owner"`
+	Note      string    `json:"note"`
+	PhotoPath string    `json:"photo_path,omitempty"`
+	IsBlocked bool      `json:"is_blocked"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	PhotoURL  string    `json:"photo_url,omitempty"`
+}
+
+// CreateKnownFaceRequest — регистрация нового лица.
+// Embedding заполняет детектор или бэкенд по загруженному снимку.
+type CreateKnownFaceRequest struct {
+	Name      string    `json:"name"`
+	Note      string    `json:"note,omitempty"`
+	IsBlocked bool      `json:"is_blocked,omitempty"`
+	Embedding []float32 `json:"embedding,omitempty"`
+	// PhotoBase64 — снимок лица в base64 (без префикса data:image).
+	PhotoBase64 string `json:"photo_base64,omitempty"`
+}
+
+// UpdateKnownFaceRequest — частичное обновление записи справочника лиц.
+type UpdateKnownFaceRequest struct {
+	Name        *string   `json:"name,omitempty"`
+	Note        *string   `json:"note,omitempty"`
+	IsBlocked   *bool     `json:"is_blocked,omitempty"`
+	Enabled     *bool     `json:"enabled,omitempty"`
+	Embedding   []float32 `json:"embedding,omitempty"`
+	PhotoBase64 *string   `json:"photo_base64,omitempty"`
+}
+
+// CreateKnownPlateRequest — добавление номера в справочник.
+type CreateKnownPlateRequest struct {
+	Plate       string `json:"plate"`
+	Owner       string `json:"owner,omitempty"`
+	Note        string `json:"note,omitempty"`
+	IsBlocked   bool   `json:"is_blocked,omitempty"`
+	PhotoBase64 string `json:"photo_base64,omitempty"`
+}
+
+// UpdateKnownPlateRequest — частичное обновление записи справочника номеров.
+type UpdateKnownPlateRequest struct {
+	Plate     *string `json:"plate,omitempty"`
+	Owner     *string `json:"owner,omitempty"`
+	Note      *string `json:"note,omitempty"`
+	IsBlocked *bool   `json:"is_blocked,omitempty"`
+	Enabled   *bool   `json:"enabled,omitempty"`
+}
+
+// FaceRecognitionSettings — настройки распознавания лиц (server_settings.face_recognition).
+type FaceRecognitionSettings struct {
+	Enabled bool `json:"enabled"`
+	// Threshold — порог схожести: больше значение — строже сравнение.
+	Threshold float64 `json:"threshold"`
+	// SnapshotUnknown — сохранять ли снимки неопознанных лиц.
+	SnapshotUnknown bool `json:"snapshot_unknown"`
+	// AlertBlocked — помечать события с заблокированными лицами как тревожные.
+	AlertBlocked bool `json:"alert_blocked"`
+}
+
+// PlateRecognitionSettings — настройки распознавания номеров (server_settings.plate_recognition).
+type PlateRecognitionSettings struct {
+	Enabled bool `json:"enabled"`
+	// Threshold — минимальная уверенность OCR.
+	Threshold float64 `json:"threshold"`
+	// Region — регион/страна для формата номеров (ru, by, kz...).
+	Region string `json:"region"`
+	// ValidateFormat включает проверку формата номера (длина + шаблон).
+	// Без неё OCR сохраняет мусор вроде «COMOTO» с OSD-меню камеры.
+	ValidateFormat bool `json:"validate_format"`
+	// MinLength и MaxLength — допустимая длина номера в символах.
+	MinLength int `json:"min_length"`
+	MaxLength int `json:"max_length"`
+	// SnapshotUnknown — сохранять ли снимки нераспознанных номеров.
+	SnapshotUnknown bool `json:"snapshot_unknown"`
+	// AlertBlocked — помечать события с заблокированными номерами как тревожные.
+	AlertBlocked bool `json:"alert_blocked"`
+}
+
+// RecognitionSettings — общие настройки распознавания.
+type RecognitionSettings struct {
+	Faces  FaceRecognitionSettings  `json:"faces"`
+	Plates PlateRecognitionSettings `json:"plates"`
+}
+
+// UpdateRecognitionSettingsRequest — частичное обновление настроек распознавания.
+type UpdateRecognitionSettingsRequest struct {
+	Faces  *FaceRecognitionSettings  `json:"faces,omitempty"`
+	Plates *PlateRecognitionSettings `json:"plates,omitempty"`
+}
+
+// TriggerType — причина, по которой была создана запись архива.
+type TriggerType string
+
+const (
+	// TriggerManual — запись запущена оператором вручную.
+	TriggerManual TriggerType = "manual"
+	// TriggerAlways — непрерывная запись по расписанию.
+	TriggerAlways TriggerType = "always"
+	// TriggerObject — обнаружен объект заданного класса.
+	TriggerObject TriggerType = "object"
+	// TriggerLine — объект пересёк заданную линию.
+	TriggerLine TriggerType = "line"
+	// TriggerFace — распознано лицо.
+	TriggerFace TriggerType = "face"
+	// TriggerPlate — распознан автомобильный номер.
+	TriggerPlate TriggerType = "plate"
+)
+
+// UpdateServerSettingsRequest — частичное обновление настроек сервера.
+type UpdateServerSettingsRequest struct {
+	Storage   *StorageConfig `json:"storage,omitempty"`
+	Snapshots *StorageConfig `json:"snapshots,omitempty"`
+}
+
+// CreateCameraRequest — запрос на создание камеры
 type CreateCameraRequest struct {
 	Name       string `json:"name" validate:"required,min=1,max=255"`
 	RTSPUrl    string `json:"rtsp_url"`

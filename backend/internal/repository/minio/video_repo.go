@@ -149,6 +149,16 @@ func (r *VideoRepo) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Stat возвращает размер объекта в байтах.
+// Используется очисткой архива, чтобы посчитать освобождённое место.
+func (r *VideoRepo) Stat(ctx context.Context, key string) (int64, error) {
+	info, err := r.client.StatObject(ctx, r.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("stat %q: %w", key, err)
+	}
+	return info.Size, nil
+}
+
 // Exists проверяет наличие объекта.
 func (r *VideoRepo) Exists(ctx context.Context, key string) (bool, error) {
 	_, err := r.client.StatObject(ctx, r.bucket, key, minio.StatObjectOptions{})
@@ -160,4 +170,61 @@ func (r *VideoRepo) Exists(ctx context.Context, key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ObjectReader — объект MinIO, открытый для чтения с заданной позиции.
+type ObjectReader struct {
+	io.ReadCloser
+	// Size — полный размер объекта в байтах (нужен для заголовка Content-Range).
+	Size int64
+}
+
+// OpenRange открывает объект для чтения начиная с байта offset.
+//
+// Это позволяет отдавать видео через бэкенд с поддержкой HTTP Range:
+// плеер запрашивает начало файла, получает корректные заголовки и может
+// перематывать, не скачивая весь ролик целиком.
+func (r *VideoRepo) OpenRange(ctx context.Context, key string, offset int64) (*ObjectReader, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	obj, err := r.client.GetObject(ctx, r.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", key, err)
+	}
+
+	// Stat даёт размер объекта; Seek переставляет позицию чтения.
+	info, err := obj.Stat()
+	if err != nil {
+		obj.Close()
+		return nil, fmt.Errorf("stat %q: %w", key, err)
+	}
+	if offset > 0 {
+		if _, err := obj.Seek(offset, io.SeekStart); err != nil {
+			obj.Close()
+			return nil, fmt.Errorf("seek %q: %w", key, err)
+		}
+	}
+	return &ObjectReader{ReadCloser: obj, Size: info.Size}, nil
+}
+
+// GetObject читает объект целиком и возвращает его содержимое и размер.
+// Используется для небольших файлов: эталонные снимки, изображения номеров.
+func (r *VideoRepo) GetObject(ctx context.Context, key string) ([]byte, int64, error) {
+	obj, err := r.client.GetObject(ctx, r.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, 0, fmt.Errorf("open %q: %w", key, err)
+	}
+	defer obj.Close()
+
+	info, err := obj.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat %q: %w", key, err)
+	}
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read %q: %w", key, err)
+	}
+	return data, info.Size, nil
 }

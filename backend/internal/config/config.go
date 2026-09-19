@@ -26,6 +26,10 @@ type Config struct {
 	MinioAccessKey      string
 	MinioSecretKey      string
 	MinioBucket         string
+	// RecordBufferDir — каталог для сегментов записи, из которых собираются клипы
+	RecordBufferDir string
+	// AudioClipDir — каталог для звуковых фрагментов (события аудиодетекции)
+	AudioClipDir string
 }
 
 func Load() (*Config, error) {
@@ -47,6 +51,8 @@ func Load() (*Config, error) {
 		MinioAccessKey:      envStr("MINIO_ACCESS_KEY", "minioadmin"),
 		MinioSecretKey:      envStr("MINIO_SECRET_KEY", "minioadmin"),
 		MinioBucket:         envStr("MINIO_BUCKET", "nvr-recordings"),
+		RecordBufferDir:     envStr("RECORD_BUFFER_DIR", "/var/lib/nvr/buffer"),
+		AudioClipDir:        envStr("AUDIO_CLIP_DIR", "/var/lib/nvr/audio"),
 	}
 
 	if cfg.JWTSecret == "change-me-in-production" {

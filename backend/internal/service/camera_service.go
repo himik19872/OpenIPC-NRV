@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -173,6 +175,10 @@ func (s *CameraService) RebootCamera(ctx context.Context, id uuid.UUID) (*Comman
 func (s *CameraService) reconnectStream(cam *domain.Camera) {
 	_ = s.removeMediaMTXPath(cam.ID.String())
 	_ = s.removeMediaMTXPath(cam.ID.String() + "_sub")
+	// Путь звука тоже удаляем: он создаётся нашим сервисом, и при
+	// перезагрузке конфигурации MediaMTX теряется. Пересоздаст его
+	// фоновый цикл синхронизации звука.
+	_ = s.removeMediaMTXPath(AudioStreamName(cam.ID))
 	time.Sleep(500 * time.Millisecond)
 	s.registerStreams(cam, "", "")
 	log.Info().Str("camera", cam.Name).Str("ip", cam.IP).Msg("stream path recreated")
@@ -199,6 +205,24 @@ func (s *CameraService) List(ctx context.Context) ([]domain.Camera, error) {
 
 func (s *CameraService) Get(ctx context.Context, id uuid.UUID) (*domain.Camera, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+// StreamURLForRecord возвращает RTSP-адрес для записи видео с учётными данными.
+// Для архива берём основной поток: субпоток слишком низкого качества.
+func (s *CameraService) StreamURLForRecord(ctx context.Context, cameraID uuid.UUID) (string, error) {
+	cam, err := s.repo.GetByID(ctx, cameraID)
+	if err != nil {
+		return "", err
+	}
+	source := cam.MainStream
+	if source == "" {
+		source = cam.RTSPUrl
+	}
+	if source == "" {
+		return "", fmt.Errorf("у камеры не задан основной поток")
+	}
+	username, password := credentialsFromSettings(cam.Settings)
+	return EmbedCredentials(source, username, password), nil
 }
 
 func (s *CameraService) Create(ctx context.Context, req domain.CreateCameraRequest) (*domain.Camera, error) {
@@ -251,6 +275,16 @@ func (s *CameraService) Create(ctx context.Context, req domain.CreateCameraReque
 	return cam, nil
 }
 
+// RegisterStreams повторно регистрирует потоки камеры в MediaMTX.
+//
+// Нужно при восстановлении после перезапуска MediaMTX: он хранит пути
+// в памяти и теряет их, поэтому монитор статуса вызывает этот метод,
+// когда обнаруживает пропавший путь.
+func (s *CameraService) RegisterStreams(cam domain.Camera) error {
+	s.registerStreams(&cam, "", "")
+	return nil
+}
+
 // registerStreams регистрирует основной и дополнительный потоки камеры в MediaMTX.
 // Креды берутся из settings, если не переданы явно.
 func (s *CameraService) registerStreams(cam *domain.Camera, username, password string) {
@@ -268,10 +302,10 @@ func (s *CameraService) registerStreams(cam *domain.Camera, username, password s
 		mainRTSP = cam.RTSPUrl
 	}
 	if mainRTSP != "" {
-		go s.addMediaMTXPath(cam.ID.String(), embedCredentials(mainRTSP, username, password))
+		go s.addMediaMTXPath(cam.ID.String(), EmbedCredentials(mainRTSP, username, password))
 	}
 	if cam.SubStream != "" {
-		go s.addMediaMTXPath(cam.ID.String()+"_sub", embedCredentials(cam.SubStream, username, password))
+		go s.addMediaMTXPath(cam.ID.String()+"_sub", EmbedCredentials(cam.SubStream, username, password))
 	}
 }
 
@@ -301,8 +335,10 @@ func (s *CameraService) RestoreStreams(ctx context.Context) {
 	log.Info().Int("cameras", restored).Msg("MediaMTX streams restore requested")
 }
 
-// embedCredentials вставляет логин/пароль в RTSP URL (rtsp://user:pass@host/...)
-func embedCredentials(rtspURL, username, password string) string {
+// EmbedCredentials вставляет логин и пароль в RTSP-ссылку.
+// Экспортируется, потому что нужна и хендлеру проверки потока:
+// оператор проверяет тот же адрес, который потом попадёт в MediaMTX.
+func EmbedCredentials(rtspURL, username, password string) string {
 	if rtspURL == "" || (username == "" && password == "") {
 		return rtspURL
 	}
@@ -322,10 +358,63 @@ func embedCredentials(rtspURL, username, password string) string {
 	return rtspURL
 }
 
-// addMediaMTXPath регистрирует RTSP-источник в MediaMTX
-func (s *CameraService) addMediaMTXPath(pathName, rtspSource string) {
-	// MediaMTX API: POST /v3/config/paths/add/{name}
+// AddPublisherPath регистрирует в MediaMTX путь-приёмник.
+//
+// Нужен для звука: транскодированный AAC публикуется обратно в MediaMTX,
+// и для этого путь должен быть настроен как publisher, а не как читатель
+// RTSP-источника. Без такой регистрации MediaMTX отвечает 400 на публикацию.
+func (s *CameraService) AddPublisherPath(pathName string) error {
 	url := fmt.Sprintf("%s/v3/config/paths/add/%s", s.mediamtxAPI, pathName)
+	// alwaysAvailable НЕ используем: в MediaMTX 1.20 этот параметр требует
+	// явного списка дорожек (alwaysAvailableTracks), иначе API отвечает
+	// 400 «'alwaysAvailableTracks' must contain at least one track».
+	// Для приёма публикации он не нужен — ffmpeg сам открывает поток.
+	payload := map[string]interface{}{
+		"name":   pathName,
+		"source": "publisher",
+		// Позволяем перезапуск публикации без остановки сервиса: ffmpeg
+		// переподключается при обрыве, и путь не должен оставаться занятым.
+		"overridePublisher": true,
+		// КЛЮЧЕВОЙ параметр: по умолчанию MediaMTX закрывает путь, если к нему
+		// 10 секунд никто не подключён. Для звука это неверно: оператор
+		// слушает камеру не постоянно, а публикация ffmpeg идёт непрерывно.
+		// Без этого значения поток обрывался через 10 секунд после старта.
+		//
+		// Значение "0s" НЕ работает: MediaMTX превращает его в пустое и
+		// возвращается к дефолтным 10 секундам. Поэтому задаём большой срок.
+		"sourceOnDemandCloseAfter": "8760h",
+	}
+	body, _ := json.Marshal(payload)
+
+	resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("add publisher path %q: %w", pathName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	// Читаем тело: по нему отличаем «уже существует» от прочих ошибок.
+	// MediaMTX отвечает 400 на повторное добавление (а не 409),
+	// поэтому проверяем текст, иначе повторный запуск звука всегда падал бы.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	msg := strings.TrimSpace(string(respBody))
+
+	if strings.Contains(msg, "already exists") {
+		return nil // путь уже настроен — цель достигнута
+	}
+	return fmt.Errorf("add publisher path %q: status %d: %s", pathName, resp.StatusCode, msg)
+}
+
+// addMediaMTXPath регистрирует RTSP-источник в MediaMTX.
+//
+// Если путь уже есть, источник не перезаписывается автоматически: MediaMTX
+// отвечает 400 «path already exists». Это опасно тем, что после правки
+// логина/пароля камеры в БД путь остаётся со СТАРЫМ адресом и камера навсегда
+// отваливается. Поэтому при конфликте делаем PATCH, обновляя source.
+func (s *CameraService) addMediaMTXPath(pathName, rtspSource string) {
 	payload := map[string]interface{}{
 		"name":           pathName,
 		"source":         rtspSource,
@@ -337,18 +426,72 @@ func (s *CameraService) addMediaMTXPath(pathName, rtspSource string) {
 	}
 	body, _ := json.Marshal(payload)
 
+	url := fmt.Sprintf("%s/v3/config/paths/add/%s", s.mediamtxAPI, pathName)
 	resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Warn().Err(err).Str("path", pathName).Str("source", rtspSource).Msg("failed to add MediaMTX path")
 		return
 	}
-	defer resp.Body.Close()
+	// Тело ответа читаем всегда: по нему отличаем «уже существует» от прочих
+	// ошибок (MediaMTX отвечает 400, а не 409).
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		log.Info().Str("path", pathName).Str("source", rtspSource).Msg("MediaMTX path added")
-	} else {
-		log.Warn().Str("path", pathName).Int("status", resp.StatusCode).Msg("MediaMTX returned non-OK status")
+		return
 	}
+
+	// Путь уже есть — обновляем источник, иначе камера останется с прежним URL.
+	if strings.Contains(string(respBody), "already exists") {
+		s.patchMediaMTXPath(pathName, rspsSource{Source: rtspSource})
+		return
+	}
+
+	log.Warn().Str("path", pathName).Int("status", resp.StatusCode).
+		Str("body", strings.TrimSpace(string(respBody))).
+		Msg("MediaMTX returned non-OK status")
+}
+
+// rspsSource — параметры патча пути. Вынесены в тип, чтобы вызов был читаемым.
+type rspsSource struct {
+	Source        string `json:"source"`
+	RTSPTransport string `json:"rtspTransport"`
+}
+
+// patchMediaMTXPath меняет источник уже существующего пути MediaMTX.
+// Нужен при смене адреса или учётных данных камеры: без него MediaMTX
+// продолжает подключаться по старому URL и путь остаётся нерабочим.
+func (s *CameraService) patchMediaMTXPath(pathName string, patch rspsSource) {
+	if patch.RTSPTransport == "" {
+		patch.RTSPTransport = "tcp"
+	}
+	body, _ := json.Marshal(patch)
+
+	url := fmt.Sprintf("%s/v3/config/paths/patch/%s", s.mediamtxAPI, pathName)
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		log.Warn().Err(err).Str("path", pathName).Msg("failed to build MediaMTX patch request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Str("path", pathName).Msg("failed to patch MediaMTX path")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Info().Str("path", pathName).Str("source", patch.Source).
+			Msg("MediaMTX path source updated")
+		return
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	log.Warn().Str("path", pathName).Int("status", resp.StatusCode).
+		Str("body", strings.TrimSpace(string(respBody))).
+		Msg("MediaMTX patch returned non-OK status")
 }
 
 // removeMediaMTXPath удаляет путь из MediaMTX.
@@ -448,6 +591,9 @@ func (s *CameraService) Update(ctx context.Context, id uuid.UUID, req domain.Upd
 	if changed {
 		_ = s.removeMediaMTXPath(cam.ID.String())
 		_ = s.removeMediaMTXPath(cam.ID.String() + "_sub")
+		// Звук публикуется в отдельный путь — его тоже нужно пересоздать,
+		// иначе после перезагрузки конфигурации звук пропадёт.
+		_ = s.removeMediaMTXPath(AudioStreamName(cam.ID))
 
 		username := ""
 		password := ""
@@ -463,12 +609,12 @@ func (s *CameraService) Update(ctx context.Context, id uuid.UUID, req domain.Upd
 		if mainRTSP == "" {
 			mainRTSP = cam.RTSPUrl
 		}
-		mainRTSP = embedCredentials(mainRTSP, username, password)
+		mainRTSP = EmbedCredentials(mainRTSP, username, password)
 		if mainRTSP != "" {
 			go s.addMediaMTXPath(cam.ID.String(), mainRTSP)
 		}
 		if cam.SubStream != "" {
-			subRTSP := embedCredentials(cam.SubStream, username, password)
+			subRTSP := EmbedCredentials(cam.SubStream, username, password)
 			go s.addMediaMTXPath(cam.ID.String()+"_sub", subRTSP)
 		}
 	}
@@ -482,5 +628,122 @@ func (s *CameraService) Delete(ctx context.Context, id uuid.UUID) error {
 	// Ошибки логируются внутри removeMediaMTXPath и не блокируют удаление.
 	_ = s.removeMediaMTXPath(id.String())
 	_ = s.removeMediaMTXPath(id.String() + "_sub")
+	// Пути звука тоже принадлежат камере: без их удаления в MediaMTX
+	// накапливаются висячие пути, а имя камеры (UUID) после удаления
+	// может быть переиспользовано новой камерой — и звук утечёт к ней.
+	_ = s.removeMediaMTXPath(AudioStreamName(id))
+	_ = s.removeMediaMTXPath(TalkStreamName(id))
 	return s.repo.Delete(ctx, id)
+}
+
+// StreamProbeResult — результат проверки доступности RTSP-потока.
+//
+// Нужен в интерфейсе при добавлении и редактировании камеры: оператор сразу
+// видит, верны ли адрес и пароль, а не ждёт, пока камера покажет «офлайн».
+type StreamProbeResult struct {
+	OK         bool   `json:"ok"`
+	Message    string `json:"message"`
+	Codec      string `json:"codec,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	HasAudio   bool   `json:"has_audio"`
+	AudioCodec string `json:"audio_codec,omitempty"`
+	FPS        string `json:"fps,omitempty"`
+}
+
+// ProbeStream проверяет, что по указанному RTSP-адресу действительно идёт
+// видео, и возвращает параметры потока.
+//
+// Проверяем именно тот адрес, который оператор ввёл в форме, а не ищем камеру
+// сканером: сканер находит камеру по IP, но не проверяет конкретный путь
+// потока (например `/stream=1` или `/av0_1`). Из-за этого легко сохранить
+// камеру с неверным sub-потоком и получить «только видео» без звука.
+func (s *CameraService) ProbeStream(rtspURL string) StreamProbeResult {
+	if strings.TrimSpace(rtspURL) == "" {
+		return StreamProbeResult{Message: "адрес потока не указан"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// -show_entries с обоими типами дорожек: за один запрос получаем и факт
+	// наличия видео, и параметры звука — не открывая соединение дважды.
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-rtsp_transport", "tcp",
+		"-timeout", "8000000",
+		"-show_entries", "stream=codec_type,codec_name,width,height,avg_frame_rate",
+		"-of", "json",
+		rtspURL,
+	)
+
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			return StreamProbeResult{Message: "камера не отвечает (таймаут 15 с)"}
+		}
+		switch {
+		case strings.Contains(msg, "401") || strings.Contains(msg, "Unauthorized"):
+			return StreamProbeResult{Message: "неверный логин или пароль (401)"}
+		case strings.Contains(msg, "404") || strings.Contains(msg, "Not Found"):
+			return StreamProbeResult{Message: "путь потока не найден на камере"}
+		case strings.Contains(msg, "Connection refused"):
+			return StreamProbeResult{Message: "камера недоступна (порт закрыт)"}
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		// Обрезаем: ffprobe пишет длинные многострочные сообщения.
+		if len(msg) > 200 {
+			msg = msg[:200] + "..."
+		}
+		return StreamProbeResult{Message: msg}
+	}
+
+	var parsed struct {
+		Streams []struct {
+			CodecType    string `json:"codec_type"`
+			CodecName    string `json:"codec_name"`
+			Width        int    `json:"width"`
+			Height       int    `json:"height"`
+			AvgFrameRate string `json:"avg_frame_rate"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return StreamProbeResult{Message: "не удалось разобрать ответ камеры"}
+	}
+
+	res := StreamProbeResult{}
+	for _, st := range parsed.Streams {
+		switch st.CodecType {
+		case "video":
+			if res.Codec == "" { // берём первую видеодорожку
+				res.Codec = st.CodecName
+				res.Width = st.Width
+				res.Height = st.Height
+				res.FPS = st.AvgFrameRate
+			}
+		case "audio":
+			res.HasAudio = true
+			if res.AudioCodec == "" {
+				res.AudioCodec = st.CodecName
+			}
+		}
+	}
+
+	if res.Codec == "" {
+		return StreamProbeResult{Message: "камера не отдаёт видео по этому адресу"}
+	}
+
+	res.OK = true
+	res.Message = fmt.Sprintf("поток доступен: %s %dx%d", strings.ToUpper(res.Codec), res.Width, res.Height)
+	if res.HasAudio {
+		res.Message += ", звук: " + strings.ToUpper(res.AudioCodec)
+	} else {
+		res.Message += ", без звука"
+	}
+	return res
 }

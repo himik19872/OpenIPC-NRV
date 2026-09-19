@@ -171,9 +171,18 @@ func (h *StreamHandler) ProxyHLS(w http.ResponseWriter, r *http.Request) {
 	// к основному потоку и отдавали ошибку. Путь же наследуется корректно.
 	filePath := strings.TrimPrefix(chi.URLParam(r, "*"), "/")
 	isSubStream := false
+	// Аудиопоток идёт отдельным путём (<cameraID>_audio): камеры отдают звук
+	// в G.711, который браузер не воспроизводит, поэтому рядом с видео
+	// публикуется транскодированный AAC. Признак — тоже в пути, по той же
+	// причине, что и для субпотока.
+	isAudioStream := false
+
 	if filePath == "sub" || strings.HasPrefix(filePath, "sub/") {
 		isSubStream = true
 		filePath = strings.TrimPrefix(strings.TrimPrefix(filePath, "sub"), "/")
+	} else if filePath == "audio" || strings.HasPrefix(filePath, "audio/") {
+		isAudioStream = true
+		filePath = strings.TrimPrefix(strings.TrimPrefix(filePath, "audio"), "/")
 	} else if r.URL.Query().Get("stream") == "sub" {
 		// Обратная совместимость со старыми ссылками (?stream=sub).
 		isSubStream = true
@@ -182,6 +191,9 @@ func (h *StreamHandler) ProxyHLS(w http.ResponseWriter, r *http.Request) {
 	pathName := cam.ID.String()
 	if isSubStream {
 		pathName = cam.ID.String() + "_sub"
+	}
+	if isAudioStream {
+		pathName = service.AudioStreamName(cam.ID)
 	}
 
 	// Остаток пути после /hls/ (например, index.m3u8, video1_stream.m3u8, segment.ts)

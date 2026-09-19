@@ -6,22 +6,37 @@ import { useToast } from '../context/ToastContext'
 import LivePlayer from '../components/LivePlayer'
 import EditCameraModal from '../components/EditCameraModal'
 import PTZPanel from '../components/PTZPanel'
+import DetectionSettingsPanel from '../components/DetectionSettingsPanel'
+import AudioSettingsPanel from '../components/AudioSettingsPanel'
 import {
   ArrowLeft, RefreshCw, Wifi, WifiOff, Radio, Info,
-  Eye, Settings, AlertTriangle, Pencil, RotateCw, Power, Loader2,
+  Eye, Settings, AlertTriangle, Pencil, RotateCw, Power, Loader2, Crosshair, Volume2,
 } from 'lucide-react'
+
+/** URL снимка события. Токен в query: <img> не передаёт заголовок Authorization. */
+function eventSnapshotSrc(eventId: string): string {
+  const token = localStorage.getItem('token')
+  return `/api/v1/events/${eventId}/snapshot${token ? `?jwt=${encodeURIComponent(token)}` : ''}`
+}
 
 export default function CameraDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const toast = useToast()
-  const [tab, setTab] = useState<'live' | 'events'>('live')
+  const [tab, setTab] = useState<'live' | 'events' | 'detection' | 'audio'>('live')
   const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null)
   const [showEdit, setShowEdit] = useState(false)
   // Какой поток показываем в плеере: основной или дополнительный.
   const [activeStream, setActiveStream] = useState<'main' | 'sub'>('main')
   // Какая из команд выполняется сейчас (для индикации на кнопке).
   const [busy, setBusy] = useState<'restart' | 'reboot' | null>(null)
+
+  // Снапшот для рисования линии детекции. Токен в query, т.к. <img>
+  // не умеет передавать заголовок Authorization (как в списке камер).
+  const snapshotToken = localStorage.getItem('token')
+  const snapshotUrl = id
+    ? `/api/v1/cameras/${id}/snapshot${snapshotToken ? `?jwt=${encodeURIComponent(snapshotToken)}` : ''}`
+    : undefined
 
   const {
     data: camera,
@@ -157,7 +172,11 @@ export default function CameraDetailPage() {
                     ? (streamInfo?.sub_hls_url || streamInfo?.hls_url || '')
                     : (streamInfo?.main_hls_url || streamInfo?.hls_url || '')
                 }
-                muted={false}
+                // Звук идёт отдельным потоком: камеры отдают G.711, который
+                // браузер в HLS не играет. Бэкенд перекодирует в AAC.
+                audioUrl={`/api/v1/cameras/${camera.id}/hls/audio/index.m3u8`}
+                muted={true}
+                volume={0.7}
               />
             ) : (
               <div className="video-placeholder" style={{ position: 'relative' }}>
@@ -213,6 +232,20 @@ export default function CameraDetailPage() {
                 <AlertTriangle size={14} />
                 События ({eventsData?.total || 0})
               </button>
+              <button
+                className={`btn ${tab === 'detection' ? 'btn-primary' : 'btn-outline'} btn-sm`}
+                onClick={() => setTab('detection')}
+              >
+                <Crosshair size={14} />
+                Детекция
+              </button>
+              <button
+                className={`btn ${tab === 'audio' ? 'btn-primary' : 'btn-outline'} btn-sm`}
+                onClick={() => setTab('audio')}
+              >
+                <Volume2 size={14} />
+                Звук
+              </button>
             </div>
 
             {tab === 'live' && (
@@ -255,11 +288,21 @@ export default function CameraDetailPage() {
                 ) : (
                   <div style={{ maxHeight: 400, overflowY: 'auto' }}>
                     {events.map((ev) => (
-                      <div key={ev.id} className="timeline-event">
+                      <div key={ev.id} className="timeline-event" style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                         <div className="timeline-time">
                           {new Date(ev.timestamp).toLocaleTimeString('ru')}
                         </div>
-                        <div className="timeline-dot" style={{ background: ev.confidence > 0.7 ? 'var(--success)' : 'var(--warning)' }} />
+                        <div className="timeline-dot" style={{ background: ev.confidence > 0.7 ? 'var(--success)' : 'var(--warning)', marginTop: 6 }} />
+                        {/* Снимок события: показываем прямо в ленте, если он сохранён */}
+                        {ev.snapshot_path && (
+                          <img
+                            src={eventSnapshotSrc(ev.id)}
+                            alt="снимок"
+                            loading="lazy"
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                            style={{ width: 72, height: 40, borderRadius: 4, objectFit: 'cover', flexShrink: 0, border: '1px solid var(--border)' }}
+                          />
+                        )}
                         <div>
                           <span style={{ textTransform: 'capitalize', fontWeight: 500 }}>{ev.object_class}</span>
                           <span style={{ marginLeft: 8, fontSize: 13, color: 'var(--text-secondary)' }}>
@@ -277,6 +320,12 @@ export default function CameraDetailPage() {
                 )}
               </div>
             )}
+
+            {tab === 'detection' && (
+              <DetectionSettingsPanel cameraId={camera.id} snapshotUrl={snapshotUrl} />
+            )}
+
+            {tab === 'audio' && <AudioSettingsPanel cameraId={camera.id} />}
           </div>
         </div>
 

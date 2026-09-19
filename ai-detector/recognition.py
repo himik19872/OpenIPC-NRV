@@ -1,0 +1,325 @@
+"""Распознавание лиц и автомобильных номеров.
+
+Модуль решает две задачи:
+
+1. ЛИЦА — по кадру находим лица и считаем для каждого эмбеддинг (ArcFace).
+   Эмбеддинг уходит в бэкенд, там сравнивается со справочником известных лиц.
+   Сравнение вынесено на бэкенд, потому что справочник меняется через API,
+   а детектор не должен ходить в БД на каждый кадр.
+
+2. НОМЕРА — находим область номерного знака и распознаём символы.
+   Результат (текст + уверенность) тоже уходит в бэкенд.
+
+Почему эмбеддинги, а не сравнение «в лоб»: сравнивать векторы (косинусная
+близость) устойчиво к ракурсу и освещению, а прямое сравнение картинок —
+нет.
+
+Модуль спроектирован так, чтобы при отсутствии моделей/библиотек детектор
+продолжал работать: распознавание просто отключается с предупреждением.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+
+from plate_format import PlateFormat
+import plate_format
+
+logger = logging.getLogger("ai-detector.recognition")
+
+
+@dataclass
+class FaceProbe:
+    """Найденное лицо: эмбеддинг для сравнения и рамка для отладки."""
+
+    embedding: list[float]
+    bbox: dict[str, float] = field(default_factory=dict)
+    # Качество/уверенность детекции лица, если модель её отдаёт
+    det_score: float = 0.0
+
+
+@dataclass
+class PlateProbe:
+    """Распознанный номер: текст, уверенность и рамка."""
+
+    text: str
+    confidence: float
+    bbox: dict[str, float] = field(default_factory=dict)
+
+
+class FaceRecognizer:
+    """Детекция лиц и расчёт эмбеддингов через insightface (ArcFace).
+
+    Модель загружается один раз и используется повторно: инициализация
+    insightface занимает секунды, делать это на каждый кадр нельзя.
+    """
+
+    def __init__(self, device: str = "cpu", det_size: int = 640):
+        self.available = False
+        self.app = None
+        self._lock = threading.Lock()
+        # Кадры меньше этого размера модель обрабатывает плохо, поэтому
+        # детектор пропускает уменьшенные кадры субпотока.
+        self.det_size = det_size
+
+        try:
+            from insightface.app import FaceAnalysis
+
+            # providers определяются устройством: CUDAExecutionProvider
+            # для GPU, CPUExecutionProvider как запасной вариант.
+            providers = ["CPUExecutionProvider"]
+            ctx_id = -1
+            if device not in ("cpu", "CPU"):
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                ctx_id = 0
+
+            self.app = FaceAnalysis(
+                name="buffalo_l",  # лёгкий набор моделей, детекция + ArcFace
+                providers=providers,
+                allowed_modules=["detection", "recognition"],
+            )
+            # det_size задаёт входной размер детектора лиц.
+            self.app.prepare(ctx_id=ctx_id, det_size=(self.det_size, self.det_size))
+            self.available = True
+            logger.info(f"распознавание лиц включено (providers={providers})")
+        except Exception as e:
+            # Отсутствие модели не должно останавливать детекцию объектов.
+            logger.warning(f"распознавание лиц недоступно: {e}")
+
+    def detect(self, img: np.ndarray) -> list[FaceProbe]:
+        """Находит лица на кадре и считает эмбеддинги."""
+        if not self.available or img is None:
+            return []
+
+        h, w = img.shape[:2]
+        if h < 64 or w < 64:
+            return []
+
+        # FaceAnalysis не потокобезопасен: onnxruntime-сессия одна на объект.
+        with self._lock:
+            try:
+                faces = self.app.get(img)
+            except Exception as e:
+                logger.debug(f"сбой детекции лиц: {e}")
+                return []
+
+        out: list[FaceProbe] = []
+        for f in faces:
+            emb = getattr(f, "normed_embedding", None)
+            if emb is None:
+                emb = getattr(f, "embedding", None)
+            if emb is None:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in f.bbox]
+            out.append(FaceProbe(
+                embedding=[float(v) for v in emb],
+                bbox={"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1},
+                det_score=float(getattr(f, "det_score", 0.0)),
+            ))
+        return out
+
+
+class PlateRecognizer:
+    """Распознавание автомобильных номеров.
+
+    Порядок обработки:
+      1. кадр обрезается до ЗОНЫ поиска (если она задана в настройках) —
+         это главная защита от OSD-меню камеры в углу кадра;
+      2. в оставшейся части ищутся прямоугольные области, похожие на номер;
+      3. текст читается Tesseract и нормализуется;
+      4. строка проверяется на соответствие формату номера.
+
+    Детекция области — морфологией и контурами, без отдельной нейросети.
+    Такой подход дешевле и не требует ещё одной модели в образе.
+    """
+
+    def __init__(self, region: str = "ru"):
+        self.available = False
+        self.region = region
+        self._pytesseract = None
+        self._lock = threading.Lock()
+
+        try:
+            import pytesseract
+            # Проверяем, что бинарник tesseract доступен: без него
+            # pytesseract импортируется, но падает при вызове.
+            pytesseract.get_tesseract_version()
+            self._pytesseract = pytesseract
+            self.available = True
+            logger.info("распознавание номеров включено (tesseract)")
+        except Exception as e:
+            logger.warning(f"распознавание номеров недоступно: {e}")
+
+    def detect(self, img: np.ndarray, zone: list[dict] | None = None,
+               fmt: PlateFormat | None = None) -> list[PlateProbe]:
+        """Ищет номерные знаки и распознаёт текст.
+
+        zone — полигон зоны поиска в нормализованных координатах (0..1).
+               Пустой список означает «весь кадр».
+        fmt  — правила формата номера; None означает «не проверять».
+        """
+        if not self.available or img is None:
+            return []
+
+        h, w = img.shape[:2]
+        if h < 120 or w < 120:
+            return []
+
+        # Зона поиска: обрезаем кадр один раз, дальше работаем с фрагментом.
+        # Смещение нужно, чтобы вернуть координаты найденного номера
+        # в системе исходного кадра.
+        offset_x, offset_y = 0, 0
+        work = img
+        if zone and len(zone) >= 3:
+            box = self._zone_box(zone, w, h)
+            if box:
+                x1, y1, x2, y2 = box
+                # Слишком маленькая зона — вероятно, ошибка в разметке;
+                # в этом случае ищем по всему кадру, а не отбрасываем кадр.
+                if (x2 - x1) >= 40 and (y2 - y1) >= 20:
+                    work = img[y1:y2, x1:x2]
+                    offset_x, offset_y = x1, y1
+
+        candidates = self._find_plate_areas(work)
+        if not candidates:
+            return []
+
+        out: list[PlateProbe] = []
+        for (x, y, bw, bh) in candidates:
+            text, conf = self._read_text(work[y:y + bh, x:x + bw])
+            if not text:
+                continue
+
+            # Проверка формата: отсекает OSD-меню, надписи и мусор OCR.
+            if fmt is not None and not plate_format.matches_format(text, fmt):
+                logger.debug(f"номер отклонён по формату: {text!r} "
+                             f"(длина {len(text)})")
+                continue
+            if fmt is not None and plate_format.looks_like_word(text):
+                logger.debug(f"номер отклонён как слово: {text!r}")
+                continue
+
+            out.append(PlateProbe(
+                text=text,
+                confidence=conf,
+                # Координаты возвращаем в системе исходного кадра
+                bbox={"x": float(x + offset_x), "y": float(y + offset_y),
+                      "w": float(bw), "h": float(bh)},
+            ))
+        return out
+
+    @staticmethod
+    def _zone_box(zone: list[dict], w: int, h: int) -> tuple[int, int, int, int] | None:
+        """Превращает полигон зоны в ограничивающий прямоугольник (пиксели).
+
+        Для поиска номера достаточно прямоугольника: номер — это вытянутая
+        область, а не сложная фигура. Полигон хранится, потому что
+        пользователь рисует зону мышью на кадре.
+        """
+        try:
+            xs = [float(p["x"]) for p in zone]
+            ys = [float(p["y"]) for p in zone]
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        x1 = max(0, int(min(xs) * w))
+        y1 = max(0, int(min(ys) * h))
+        x2 = min(w, int(max(xs) * w))
+        y2 = min(h, int(max(ys) * h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    def _find_plate_areas(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """Ищет прямоугольные области, похожие на номерной знак.
+
+        Номер — это вытянутый прямоугольник с высоким контрастом символов,
+        поэтому смотрим на контуры после морфологической обработки.
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Сглаживание убирает шум, сохраняя края символов
+        blur = cv2.bilateralFilter(gray, 11, 17, 17)
+        # Градиент Собеля подчёркивает вертикальные границы символов
+        sobel = cv2.Sobel(blur, cv2.CV_8U, 1, 0, ksize=3)
+        _, thresh = cv2.threshold(sobel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Закрытие объединяет отдельные символы в один прямоугольник
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 5))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        closed = cv2.erode(closed, None, iterations=2)
+        closed = cv2.dilate(closed, None, iterations=2)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        out: list[tuple[int, int, int, int]] = []
+        img_area = img.shape[0] * img.shape[1]
+        for c in contours:
+            x, y, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
+            if area < img_area * 0.0005 or area > img_area * 0.5:
+                continue
+            # Номерной знак — вытянутый: соотношение сторон примерно 2:1..6:1
+            ratio = bw / max(1, bh)
+            if ratio < 1.5 or ratio > 6.0:
+                continue
+            out.append((x, y, bw, bh))
+
+        # Берём самые крупные области: мелкие с большой вероятностью шум
+        out.sort(key=lambda r: r[2] * r[3], reverse=True)
+        return out[:3]
+
+    def _read_text(self, crop: np.ndarray) -> tuple[str, float]:
+        """Распознаёт текст в вырезанной области номера.
+
+        Возвращает нормализованную строку (кириллица приведена к латинице,
+        разделители убраны) и уверенность.
+        """
+        if crop.size == 0:
+            return "", 0.0
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        # Увеличение помогает Tesseract: символы на кадре обычно мелкие
+        scale = max(1.0, 300 / max(1, gray.shape[1]))
+        if scale > 1.0:
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # Порог по Otsu делает символы чёрными на белом — как ожидает OCR
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        config = "--psm 7 -c tessedit_char_whitelist=ABCEHKMOPTXY0123456789"
+        with self._lock:
+            try:
+                data = self._pytesseract.image_to_data(
+                    binary, config=config, output_type=self._pytesseract.Output.DICT)
+            except Exception as e:
+                logger.debug(f"сбой OCR номера: {e}")
+                return "", 0.0
+
+        # Склеиваем распознанные слова и собираем уверенность
+        words = [w for w in data.get("text", []) if w and w.strip()]
+        if not words:
+            return "", 0.0
+
+        confs = []
+        for c in data.get("conf", []):
+            try:
+                val = float(c)
+                if val >= 0:
+                    confs.append(val / 100.0)
+            except (TypeError, ValueError):
+                continue
+
+        raw = "".join(words).upper()
+        text = plate_format.normalize(raw)
+        if not text:
+            return "", 0.0
+
+        # Уверенность пересчитываем: tesseract может отдать нули даже для
+        # верно прочитанного текста, тогда оценка идёт по структуре строки.
+        fmt = PlateFormat(min_length=1, max_length=20, pattern="")
+        confidence = plate_format.clean_confidence(confs, text, fmt)
+        return text, confidence

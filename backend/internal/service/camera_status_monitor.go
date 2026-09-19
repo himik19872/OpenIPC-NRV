@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/nvr/backend/internal/domain"
 	"github.com/nvr/backend/internal/repository/postgres"
 	"github.com/rs/zerolog/log"
 )
@@ -23,6 +25,16 @@ type CameraStatusMonitor struct {
 	interval    time.Duration
 	wasOnline   map[string]bool // предыдущее состояние — чтобы логировать переходы
 	pruning     map[string]bool // пути, удаление которых уже не удалось (не повторяем)
+	// onRestore перерегистрирует пути камеры в MediaMTX. Задан функцией,
+	// чтобы монитор не зависел от сервиса камер напрямую.
+	onRestore func(cam domain.Camera) error
+}
+
+// WithRestore подключает восстановление пропавших путей камер.
+// Без него рестарт MediaMTX оставит камеры без потока.
+func (m *CameraStatusMonitor) WithRestore(fn func(cam domain.Camera) error) *CameraStatusMonitor {
+	m.onRestore = fn
+	return m
 }
 
 func NewCameraStatusMonitor(repo *postgres.CameraRepo, mediamtxAPI string) *CameraStatusMonitor {
@@ -81,11 +93,18 @@ func (m *CameraStatusMonitor) syncOnce(ctx context.Context) {
 	}
 
 	// Ожидаемые имена путей: <uuid> и <uuid>_sub для каждой камеры.
+	// Путь звука (<uuid>_audio) сюда НЕ входит: его создаёт сервис аудио,
+	// и удалять его как «висячий» нельзя.
 	expected := make(map[string]bool, len(cameras)*2)
 	for _, cam := range cameras {
 		expected[cam.ID.String()] = true
 		expected[cam.ID.String()+"_sub"] = true
 	}
+
+	// Восстанавливаем пропавшие пути: MediaMTX хранит их в памяти и теряет
+	// при своём перезапуске. Без восстановления камеры остаются без потока
+	// до ручного вмешательства.
+	m.restoreMissingPaths(ctx, cameras, expected, allPaths)
 
 	m.pruneOrphanPaths(ctx, allPaths, expected)
 
@@ -123,6 +142,35 @@ func (m *CameraStatusMonitor) syncOnce(ctx context.Context) {
 	}
 }
 
+// restoreMissingPaths перерегистрирует в MediaMTX пути, которых там нет.
+//
+// MediaMTX хранит конфигурацию путей в памяти и теряет её при перезапуске.
+// Раньше пути восстанавливались только один раз — при старте backend,
+// поэтому рестарт MediaMTX оставлял камеры без потока до перезапуска backend.
+func (m *CameraStatusMonitor) restoreMissingPaths(ctx context.Context, cameras []domain.Camera, expected map[string]bool, paths map[string]bool) {
+	restored := 0
+	for _, cam := range cameras {
+		for _, name := range []string{cam.ID.String(), cam.ID.String() + "_sub"} {
+			if !expected[name] || paths[name] {
+				continue
+			}
+			// Путь пропал — просим сервис камер зарегистрировать его заново.
+			if m.onRestore == nil {
+				continue
+			}
+			if err := m.onRestore(cam); err != nil {
+				log.Warn().Err(err).Str("camera", cam.Name).Str("path", name).
+					Msg("camera status monitor: не удалось восстановить путь")
+				continue
+			}
+			restored++
+		}
+	}
+	if restored > 0 {
+		log.Info().Int("paths", restored).Msg("пути камер восстановлены в MediaMTX")
+	}
+}
+
 // pruneOrphanPaths удаляет пути MediaMTX, для которых нет камеры в БД.
 // Пути со статусом starting (запрос на удаление уже отправлен) повторно не трогаем —
 // так мы избегаем бесконечных повторов, если MediaMTX не может удалить путь
@@ -130,6 +178,12 @@ func (m *CameraStatusMonitor) syncOnce(ctx context.Context) {
 func (m *CameraStatusMonitor) pruneOrphanPaths(ctx context.Context, paths map[string]bool, expected map[string]bool) {
 	for name := range paths {
 		if expected[name] || m.pruning[name] {
+			continue
+		}
+		// Пути звука (<uuid>_audio) создаёт сервис аудио, и они не относятся
+		// к камерам напрямую. Служебные пути не удаляем, иначе звук будет
+		// постоянно пропадать и создаваться заново.
+		if strings.HasSuffix(name, "_audio") || strings.HasSuffix(name, "_talk") {
 			continue
 		}
 

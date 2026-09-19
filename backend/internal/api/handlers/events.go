@@ -37,7 +37,7 @@ func (h *EventHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	events, total, err := h.svc.List(r.Context(), cameraID, page, pageSize)
+	events, total, err := h.svc.List(r.Context(), cameraID, r.URL.Query().Get("object_class"), page, pageSize)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

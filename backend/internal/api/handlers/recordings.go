@@ -1,9 +1,12 @@
 package handlers
 
 import (
-	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nvr/backend/internal/domain"
 	miniorepo "github.com/nvr/backend/internal/repository/minio"
+	"github.com/nvr/backend/internal/service"
 	"github.com/rs/zerolog/log"
 )
 
@@ -19,27 +23,133 @@ type RecordingHandler struct {
 	// videoRepo может быть nil, если MinIO недоступен: тогда архив
 	// остаётся доступен для чтения метаданных, но без ссылок на файлы.
 	videoRepo *miniorepo.VideoRepo
+	// storage нужен для отдачи файлов из локального хранилища.
+	storage *service.StorageService
 }
 
-func NewRecordingHandler(db *pgxpool.Pool, videoRepo *miniorepo.VideoRepo) *RecordingHandler {
-	return &RecordingHandler{db: db, videoRepo: videoRepo}
+func NewRecordingHandler(db *pgxpool.Pool, videoRepo *miniorepo.VideoRepo, storage *service.StorageService) *RecordingHandler {
+	return &RecordingHandler{db: db, videoRepo: videoRepo, storage: storage}
 }
 
-// signedURL возвращает временную ссылку на файл записи в MinIO.
+// signedURL возвращает ссылку на файл записи.
 // Пустая строка означает, что ссылку получить не удалось.
+//
+// Ссылка ВСЕГДА относительная (на этот же хост, что и интерфейс), потому что
+// presigned-ссылка MinIO подписана под конкретный Host и ломается при открытии
+// архива с другого компьютера или через внешний IP. Бэкенд сам выступит прокси:
+// объект из MinIO отдаёт обработчик File.
 func (h *RecordingHandler) signedURL(filePath string) string {
-	if h.videoRepo == nil || filePath == "" {
+	if filePath == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	return "/api/v1/recordings/file?path=" + url.QueryEscape(filePath)
+}
 
-	url, err := h.videoRepo.PresignedURL(ctx, filePath, time.Hour)
-	if err != nil {
-		log.Warn().Err(err).Str("key", filePath).Msg("failed to presign recording url")
-		return ""
+// File отдаёт файл записи — из MinIO или с локального диска.
+// GET /api/v1/recordings/file?path=minio%3A... | local%3A%2F...
+//
+// Зарегистрирован вне JWT-группы: файл воспроизводится в теге <video>,
+// который не передаёт заголовок Authorization. Токен проверяется в query.
+//
+// Отдача идёт через бэкенд (а не presigned-ссылкой MinIO), потому что подпись
+// MinIO привязана к Host: при открытии интерфейса по внешнему адресу
+// такая ссылка указывала бы на localhost клиента и не работала.
+func (h *RecordingHandler) File(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
 	}
-	return url
+
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	if strings.HasPrefix(path, "local:") {
+		full, err := service.LocalRecordingPath(path)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+			return
+		}
+		// ServeFile сам разбирается с Range-запросами и отдаёт 206.
+		http.ServeFile(w, r, full)
+		return
+	}
+
+	if h.videoRepo == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage unavailable"})
+		return
+	}
+
+	key := strings.TrimPrefix(path, "minio:")
+	offset, length, err := parseRange(r.Header.Get("Range"))
+	if err != nil {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", length))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	obj, err := h.videoRepo.OpenRange(r.Context(), key, offset)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recording file not found"})
+		return
+	}
+	defer obj.Close()
+
+	size := obj.Size
+	if length > 0 && offset+length > size {
+		length = size - offset
+	}
+	if length <= 0 {
+		length = size - offset
+	}
+
+	if offset > 0 || length < size {
+		// Частичный ответ: без него Chrome не начинает воспроизведение
+		// и не даёт перематывать.
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, size))
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	// Стримим без буферизации в память: клипы бывают по 20+ МБ.
+	io.CopyN(w, obj, length)
+}
+
+// parseRange разбирает заголовок Range вида "bytes=0-1023".
+// Возвращает смещение и длину. Если заголовка нет — offset=0, length=0
+// (это означает «отдать файл целиком»).
+func parseRange(header string) (offset, length int64, err error) {
+	if header == "" {
+		return 0, 0, nil
+	}
+	spec, ok := strings.CutPrefix(header, "bytes=")
+	if !ok {
+		return 0, 0, nil // неизвестный формат — отдаём файл целиком
+	}
+	spec = strings.TrimSpace(strings.Split(spec, ",")[0])
+	startStr, endStr, found := strings.Cut(spec, "-")
+	if !found {
+		return 0, 0, fmt.Errorf("invalid range")
+	}
+
+	if startStr == "" {
+		// Форма "bytes=-500": последние 500 байт — для видео не нужна,
+		// отдаём файл целиком.
+		return 0, 0, nil
+	}
+	offset, err = strconv.ParseInt(startStr, 10, 64)
+	if err != nil || offset < 0 {
+		return 0, 0, fmt.Errorf("invalid range start")
+	}
+	if endStr == "" {
+		return offset, 0, nil // "bytes=500-" — до конца файла
+	}
+	end, err := strconv.ParseInt(endStr, 10, 64)
+	if err != nil || end < offset {
+		return 0, 0, fmt.Errorf("invalid range end")
+	}
+	return offset, end - offset + 1, nil
 }
 
 func (h *RecordingHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -61,10 +171,16 @@ func (h *RecordingHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `SELECT id, camera_id, start_time, end_time,
-		EXTRACT(EPOCH FROM (end_time - start_time))::float as duration,
-		file_path, file_size, resolution, codec, event_triggered, metadata
-		FROM recordings WHERE 1=1`
+	// resolution и codec могут быть NULL — приводим к пустой строке,
+	// иначе rows.Scan не сможет записать NULL в string и запись молча теряется.
+	// JOIN с cameras нужен, чтобы в архиве показывать имя камеры, а не UUID.
+	query := `SELECT r.id, r.camera_id, COALESCE(c.name,'') AS camera_name,
+		r.start_time, r.end_time,
+		EXTRACT(EPOCH FROM (r.end_time - r.start_time))::float as duration,
+		r.file_path, r.file_size, COALESCE(r.resolution,'') AS resolution,
+		COALESCE(r.codec,'') AS codec, r.event_triggered, COALESCE(r.metadata,'{}') AS metadata,
+		COALESCE(r.trigger_type,'') AS trigger_type, COALESCE(r.trigger_detail,'') AS trigger_detail
+		FROM recordings r LEFT JOIN cameras c ON c.id = r.camera_id WHERE 1=1`
 	countQuery := `SELECT COUNT(*) FROM recordings WHERE 1=1`
 	args := []interface{}{}
 	argIdx := 1
@@ -76,6 +192,24 @@ func (h *RecordingHandler) List(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
+	// Фильтр по причине записи — основной способ найти нужное в архиве:
+	// «покажи всё, что записалось из-за номеров».
+	if trigger := r.URL.Query().Get("trigger"); trigger != "" {
+		query += ` AND r.trigger_type = $` + strconv.Itoa(argIdx)
+		countQuery += ` AND trigger_type = $` + strconv.Itoa(argIdx)
+		args = append(args, trigger)
+		argIdx++
+	}
+
+	// Поиск по расшифровке триггера: номер машины, имя человека, класс объекта.
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		cond := ` AND r.trigger_detail ILIKE $` + strconv.Itoa(argIdx)
+		query += cond
+		countQuery += ` AND trigger_detail ILIKE $` + strconv.Itoa(argIdx)
+		args = append(args, "%"+search+"%")
+		argIdx++
+	}
+
 	// Total count
 	var total int64
 	if err := h.db.QueryRow(r.Context(), countQuery, args...).Scan(&total); err != nil {
@@ -84,7 +218,7 @@ func (h *RecordingHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	offset := (page - 1) * pageSize
-	query += ` ORDER BY start_time DESC LIMIT $` + strconv.Itoa(argIdx) + ` OFFSET $` + strconv.Itoa(argIdx+1)
+	query += ` ORDER BY r.start_time DESC LIMIT $` + strconv.Itoa(argIdx) + ` OFFSET $` + strconv.Itoa(argIdx+1)
 	args = append(args, pageSize, offset)
 
 	rows, err := h.db.Query(r.Context(), query, args...)
@@ -101,9 +235,10 @@ func (h *RecordingHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rec domain.Recording
 		if err := rows.Scan(
-			&rec.ID, &rec.CameraID, &rec.StartTime, &rec.EndTime,
+			&rec.ID, &rec.CameraID, &rec.CameraName, &rec.StartTime, &rec.EndTime,
 			&rec.Duration, &rec.FilePath, &rec.FileSize,
 			&rec.Resolution, &rec.Codec, &rec.EventTriggered, &rec.Metadata,
+			&rec.TriggerType, &rec.TriggerDetail,
 		); err != nil {
 			continue
 		}
@@ -134,14 +269,18 @@ func (h *RecordingHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var rec domain.Recording
 	err = h.db.QueryRow(r.Context(),
-		`SELECT id, camera_id, start_time, end_time,
-		EXTRACT(EPOCH FROM (end_time - start_time))::float as duration,
-		file_path, file_size, resolution, codec, event_triggered, metadata
-		FROM recordings WHERE id = $1`, id.String(),
+		`SELECT r.id, r.camera_id, COALESCE(c.name,'') AS camera_name,
+		r.start_time, r.end_time,
+		EXTRACT(EPOCH FROM (r.end_time - r.start_time))::float as duration,
+		r.file_path, r.file_size, COALESCE(r.resolution,'') AS resolution,
+		COALESCE(r.codec,'') AS codec, r.event_triggered, COALESCE(r.metadata,'{}') AS metadata,
+		COALESCE(r.trigger_type,'') AS trigger_type, COALESCE(r.trigger_detail,'') AS trigger_detail
+		FROM recordings r LEFT JOIN cameras c ON c.id = r.camera_id WHERE r.id = $1`, id.String(),
 	).Scan(
-		&rec.ID, &rec.CameraID, &rec.StartTime, &rec.EndTime,
+		&rec.ID, &rec.CameraID, &rec.CameraName, &rec.StartTime, &rec.EndTime,
 		&rec.Duration, &rec.FilePath, &rec.FileSize,
 		&rec.Resolution, &rec.Codec, &rec.EventTriggered, &rec.Metadata,
+		&rec.TriggerType, &rec.TriggerDetail,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recording not found"})
@@ -157,6 +296,7 @@ func recordingResponse(rec domain.Recording, url string) map[string]any {
 	return map[string]any{
 		"id":              rec.ID,
 		"camera_id":       rec.CameraID,
+		"camera_name":     rec.CameraName,
 		"start_time":      rec.StartTime,
 		"end_time":        rec.EndTime,
 		"duration":        rec.Duration,
@@ -165,6 +305,8 @@ func recordingResponse(rec domain.Recording, url string) map[string]any {
 		"resolution":      rec.Resolution,
 		"codec":           rec.Codec,
 		"event_triggered": rec.EventTriggered,
+		"trigger_type":    rec.TriggerType,
+		"trigger_detail":  rec.TriggerDetail,
 		"metadata":        rec.Metadata,
 		"url":             url,
 	}

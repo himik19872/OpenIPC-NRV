@@ -73,6 +73,11 @@ services:
       MINIO_BUCKET: "nvr-recordings"
       NATS_URL: "nats://localhost:4222"
       MEDIAMTX_HOST: "localhost:8888"
+    volumes:
+      # Локальное хранилище снимков и записей (режим "local" в настройках сервера).
+      # Без этого тома файлы писались бы внутрь контейнера и терялись при
+      # его пересоздании, а образ оставался бы «пухнуть».
+      - nvr_data:/var/lib/nvr
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +100,81 @@ services:
     depends_on:
       - backend
 
+  ai-detector:
+    build:
+      context: ./ai-detector
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NATS_URL: "nats://nats:4222"
+      # Детектор работает в bridge-сети compose, поэтому обращаемся к Postgres
+      # по имени сервиса и внутреннему порту 5432 (не по localhost:5434).
+      DATABASE_URL: "postgres://nvr:${DB_PASSWORD:-nvr_secret}@postgres:5432/nvr?sslmode=disable"
+      MODEL_PATH: "yolov8n.pt"
+      # 'cuda'/'0' — GPU, 'cpu' — только CPU (см. resolve_device в main.py)
+      DEVICE: "${AI_DEVICE:-cuda}"
+      CONFIDENCE: "0.4"
+      # Трекинг объектов даёт track_id, но чувствителен к смене разрешения кадра.
+      # TRACK=false отключает его — события продолжат сохраняться без track_id.
+      TRACK: "${AI_TRACK:-true}"
+      # Отправлять JPEG кадра вместе с событием (бэкенд сохранит как снимок)
+      SEND_SNAPSHOT: "${AI_SEND_SNAPSHOT:-true}"
+      # Распознавание лиц и номеров. Модуль сам отключается, если модель
+      # или библиотека недоступна, поэтому значения по умолчанию — true.
+      ENABLE_FACE_RECOGNITION: "${AI_FACES:-true}"
+      ENABLE_PLATE_RECOGNITION: "${AI_PLATES:-true}"
+      PLATE_REGION: "${AI_PLATE_REGION:-ru}"
+      # Детекция звука (YAMNet): выстрелы, крики, разбитое стекло и т.п.
+      # Отключается, если нужен только видеоанализ — экономит CPU.
+      ENABLE_AUDIO_DETECTION: "${AI_AUDIO:-true}"
+      # Откуда брать звук: транскодированный AAC лежит в MediaMTX.
+      # Имя сервиса в compose-сети, а не localhost.
+      MEDIAMTX_RTSP: "mediamtx:8554"
+      # Ограничиваем видимость только первой GPU
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+    # Проброс GPU через CDI (nvidia-container-toolkit уже настроен на хосте).
+    # Работает только при наличии установленного драйвера NVIDIA на хосте.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      nats:
+        condition: service_started
+      mediamtx:
+        condition: service_started
+
+  # Тянет кадры из RTSP-субпотоков камер и публикует их в NATS для ai-detector.
+  # Без него детектору нечего обрабатывать — цепочка детекции разорвана.
+  frame-publisher:
+    build:
+      context: ./ai-detector
+      dockerfile: Dockerfile.publisher
+    restart: unless-stopped
+    # host-сеть нужна, чтобы дотянуться до камер в локальной сети (порт 554),
+    # как это делает backend.
+    network_mode: host
+    environment:
+      DATABASE_URL: "postgres://nvr:${DB_PASSWORD:-nvr_secret}@localhost:5434/nvr?sslmode=disable"
+      NATS_URL: "nats://localhost:4222"
+      # Период опроса каждой камеры, сек
+      FRAME_INTERVAL: "${FRAME_INTERVAL:-1.0}"
+      # Ширина кадра для детекции (0 — без ресайза)
+      FRAME_WIDTH: "${FRAME_WIDTH:-960}"
+      CAMERA_RELOAD: "60"
+      FFMPEG_TIMEOUT: "10"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
 volumes:
   pgdata:
   minio_data:
+  # Локальные снимки и записи (при backend: local в настройках сервера)
+  nvr_data:

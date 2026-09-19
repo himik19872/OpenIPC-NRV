@@ -111,7 +111,113 @@ sudo journalctl -u nvr -f
 
 ---
 
-## 5. Добавление камер
+## 5. AI-детекция на GPU (NVIDIA CUDA)
+
+Детектор объектов (`ai-detector`) работает на YOLOv8 и может использовать видеокарту
+NVIDIA. Без GPU он тоже запускается, но обрабатывает меньше потоков.
+
+### 5.1. Требования к видеокарте
+
+Нужна карта с архитектурой **Pascal (compute capability 6.1) или новее**.
+Проверьте модель:
+
+```bash
+lspci -nn | grep -i nvidia
+```
+
+Проверенная конфигурация: **NVIDIA P104-100 (8 ГБ VRAM)** — майнинговая ревизия GTX 1070.
+
+> ⚠️ **Важно про версию драйвера.** Ветка драйверов **580 — последняя, поддерживающая
+> Pascal / Maxwell / Volta**. Более новые ветки (595, 610) эти архитектуры уже не
+> поддерживают, хотя `ubuntu-drivers devices` может их предлагать. Для Pascal ставьте
+> именно 580.
+
+### 5.2. Установка драйвера
+
+```bash
+# Удалите ранее установленные пакеты NVIDIA во избежание конфликта версий
+sudo apt-get remove --purge 'nvidia-driver-*' 'libnvidia-*-535' 'nvidia-*-535' \
+     'linux-modules-nvidia-*' 'linux-objects-nvidia-*'
+
+# Установите драйвер 580 (сборка модулей ядра через DKMS)
+sudo apt-get update
+sudo apt-get install -y nvidia-driver-580
+
+# Проверка
+nvidia-smi
+```
+
+Ожидаемый вывод — таблица с моделью карты, версией драйвера и объёмом памяти.
+
+### 5.3. Установка CUDA Toolkit 12.6
+
+```bash
+cd /tmp
+curl -fsSL -O https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get install -y cuda-toolkit-12-6
+```
+
+CUDA Toolkit на хосте нужна только как рантайм-совместимость. Основные библиотеки
+для PyTorch приходят внутри Docker-образа `nvidia/cuda:12.6.2-cudnn-runtime-ubuntu24.04`.
+
+### 5.4. NVIDIA Container Toolkit
+
+```bash
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+Проверьте, что Docker видит GPU:
+
+```bash
+docker info | grep -i runtime      # Default Runtime: nvidia
+docker run --rm --gpus all nvidia/cuda:12.6.2-base-ubuntu24.04 nvidia-smi
+```
+
+### 5.5. Запуск детектора
+
+Детектор включён в `docker-compose.yml` как сервис `ai-detector`. Выбор устройства
+задаётся переменной `AI_DEVICE`:
+
+```bash
+# GPU (по умолчанию)
+AI_DEVICE=cuda docker compose up -d ai-detector
+
+# Принудительно CPU (если видеокарты нет)
+AI_DEVICE=cpu docker compose up -d ai-detector
+```
+
+Полная проверка сквозного доступа к GPU из контейнера:
+
+```bash
+bash scripts/check-gpu.sh
+```
+
+Скрипт проверяет драйвер на хосте, runtime Docker, доступность GPU в контейнере
+и выполняет тестовое матричное умножение на GPU через PyTorch.
+
+### 5.6. Устранение неполадок
+
+| Симптом | Причина | Решение |
+|---|---|---|
+| `nvidia-smi: command not found` | Драйвер не установлен | Установите `nvidia-driver-580` |
+| `couldn't communicate with the NVIDIA driver` | Модуль не собран под текущее ядро | `sudo apt-get install --reinstall nvidia-dkms-580`, перезагрузка |
+| `cuda available: False` в контейнере | Нет `--gpus all` / `deploy.resources` | Проверьте секцию `ai-detector` в `docker-compose.yml` |
+| `CUDA error: no kernel image is available` | Драйвер не поддерживает архитектуру карты | Для Pascal нужен драйвер **580**, не 595/610 |
+| Контейнер падает при старте | Нет `nvidia-container-toolkit` | Шаг 5.4 |
+
+Пересборка образа детектора после изменений:
+
+```bash
+docker compose build --no-cache ai-detector
+```
+
+---
+
+## 6. Добавление камер
 
 ### Автоматический поиск
 
@@ -144,7 +250,7 @@ sudo journalctl -u nvr -f
 
 ---
 
-## 6. Проверка работоспособности
+## 7. Проверка работоспособности
 
 ```bash
 # Состояние службы и контейнеров
@@ -173,7 +279,7 @@ ffprobe -v error -rtsp_transport tcp -timeout 5000000 \
 
 ---
 
-## 7. Резервное копирование
+## 8. Резервное копирование
 
 ```bash
 ./scripts/nvr.sh backup     # дамп БД в ./backups/nvr_ГГГГММДД_ЧЧММСС.sql
@@ -196,7 +302,7 @@ docker run --rm -v gigacode_minio_data:/data -v "$PWD:/backup" alpine \
 
 ---
 
-## 8. Обновление
+## 9. Обновление
 
 ```bash
 cd OpenIPC-NRV
@@ -209,7 +315,7 @@ git pull
 
 ---
 
-## 9. Настройка TLS и внешний доступ
+## 10. Настройка TLS и внешний доступ
 
 Прямой вывод сервера в интернет **не рекомендуется**. Используйте обратный прокси.
 
@@ -264,7 +370,7 @@ sudo ufw enable
 
 ---
 
-## 10. Удалённые камеры за NAT
+## 11. Удалённые камеры за NAT
 
 Для объектов без публичного IP штатно предусмотрен WireGuard.
 Автоматическое управление туннелями пока не реализовано (заготовка в
@@ -305,7 +411,7 @@ PersistentKeepalive = 25
 
 ---
 
-## 11. Частые проблемы
+## 12. Частые проблемы
 
 См. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — там разобраны случаи, когда
 камера числится offline, не играет видео и не работают снапшоты.

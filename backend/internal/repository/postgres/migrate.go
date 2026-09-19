@@ -109,18 +109,49 @@ func adoptExistingSchema(m *migrate.Migrate, db *sql.DB) error {
 
 // detectSchemaVersion определяет, какая миграция соответствует текущей схеме,
 // по набору колонок. Возвращает 0, если определить не удалось.
+//
+// Проверки идут от старших версий к младшим: важен самый поздний признак,
+// который есть в схеме.
 func detectSchemaVersion(db *sql.DB) uint {
-	var hasMainStream bool
-	err := db.QueryRow(`SELECT EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_name = 'cameras' AND column_name = 'main_stream'
-	)`).Scan(&hasMainStream)
-	if err != nil {
-		return 0
+	// 007 — звук с камер и события аудиодетекции
+	if tableExists(db, "audio_settings") {
+		return 7
+	}
+	// 006 — область и точность распознавания номеров
+	if columnExists(db, "detection_settings", "plate_zone") {
+		return 6
+	}
+	// 005 — справочник известных лиц
+	if columnExists(db, "known_faces", "embedding") {
+		return 5
+	}
+	// 004 — настройки детекции
+	if tableExists(db, "detection_settings") {
+		return 4
 	}
 	// 002 добавляет поля двухпоточной модели, без них схема на версии 1.
-	if hasMainStream {
+	if columnExists(db, "cameras", "main_stream") {
 		return 2
 	}
 	return 1
+}
+
+// tableExists сообщает, есть ли таблица в схеме public.
+func tableExists(db *sql.DB, table string) bool {
+	var exists bool
+	err := db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.tables
+		WHERE table_schema = 'public' AND table_name = $1
+	)`, table).Scan(&exists)
+	return err == nil && exists
+}
+
+// columnExists сообщает, есть ли колонка у таблицы в схеме public.
+func columnExists(db *sql.DB, table, column string) bool {
+	var exists bool
+	err := db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+	)`, table, column).Scan(&exists)
+	return err == nil && exists
 }

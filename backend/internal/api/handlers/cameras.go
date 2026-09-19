@@ -88,6 +88,29 @@ func (h *CameraHandler) Update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cam)
 }
 
+// ProbeStream проверяет RTSP-адрес до сохранения камеры.
+// POST /api/v1/cameras/probe-stream
+//
+// Тело: {rtsp_url, username, password}. Если в адресе нет кредов,
+// они подставляются из username/password — так оператор проверяет
+// ровно то, что попадёт в MediaMTX.
+func (h *CameraHandler) ProbeStream(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RTSPURL  string `json:"rtsp_url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	url := service.EmbedCredentials(req.RTSPURL, req.Username, req.Password)
+	// Всегда 200: неудача проверки — это результат, а не ошибка сервера,
+	// иначе фронтенд покажет тост вместо пояснения под полем.
+	writeJSON(w, http.StatusOK, h.svc.ProbeStream(url))
+}
+
 func (h *CameraHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {

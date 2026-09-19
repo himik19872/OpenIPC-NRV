@@ -1,0 +1,19 @@
+# Сервис публикации кадров — лёгкий образ без CUDA.
+# Ему нужен только ffmpeg (для вытягивания кадра из RTSP) и Python.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-publisher.txt .
+RUN pip install --no-cache-dir -r requirements-publisher.txt
+
+COPY frame_publisher_service.py .
+
+ENTRYPOINT ["python", "frame_publisher_service.py"]

@@ -1,6 +1,27 @@
 nats-py>=0.0.1
+# psycopg2 нужен для чтения настроек детекции из PostgreSQL
+psycopg2-binary>=2.9.9
 ultralytics==8.2.103
-opencv-python-headless==4.10.0
+# lapx нужен для трекинга объектов (model.track). Ultralytics пытается доустановить
+# его сам, но в Ubuntu 24.04 pip заблокирован PEP 668 (externally-managed-environment),
+# поэтому ставим заранее.
+lapx>=0.5.2
+# opencv для Python 3.12 имеет суффикс сборки в версии (4.10.0 без суффикса не резолвится)
+opencv-python-headless==4.10.0.84
 numpy==1.26.4
 Pillow==10.4.0
 psutil==6.0.0
+# Распознавание лиц: insightface даёт детекцию лица и эмбеддинг ArcFace.
+# Версия 0.7.3 — последняя стабильная на PyPI. Собирается из исходников
+# (требует компилятор C++), поэтому в Dockerfile ставится build-essential.
+insightface==0.7.3
+# onnxruntime — исполнитель моделей insightface (CPU-сборка: GPU-вариант
+# конфликтует с CUDA-библиотеками образа).
+onnxruntime>=1.18.0
+# Распознавание номеров: tesseract — системный OCR, pytesseract — обёртка.
+pytesseract>=0.3.10
+# Детекция звука: YAMNet работает через TFLite. ai-edge-litert — лёгкий
+# runtime от Google (~2 МБ), не тянет TensorFlow целиком.
+ai-edge-litert>=2.1.0
+# ВАЖНО: torch и torchvision НЕ указываются здесь — они ставятся в Dockerfile
+# из индекса PyTorch cu126, иначе pip подтянет CPU-сборку и GPU не заработает.

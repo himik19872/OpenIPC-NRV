@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { eventsAPI, DetectionEvent } from '../api/client'
+import { eventsAPI, DetectionEvent, TRIGGER_LABELS, TriggerType } from '../api/client'
 import { useAsync } from '../hooks/useApi'
-import { AlertTriangle, Car, User, Dog, Package, Eye } from 'lucide-react'
+import { AlertTriangle, Car, User, Dog, Package, Eye, X, Download } from 'lucide-react'
 
 const classIcons: Record<string, any> = {
   person: User,
@@ -19,11 +19,36 @@ const classColors: Record<string, string> = {
   package: '#af52de',
 }
 
+/** Есть ли у события сохранённый снимок. */
+function hasSnapshot(ev: DetectionEvent): boolean {
+  return Boolean(ev.snapshot_path)
+}
+
+/** URL снимка события. Токен в query: <img> не передаёт заголовок Authorization. */
+function snapshotSrc(eventId: string): string {
+  const token = localStorage.getItem('token')
+  return `/api/v1/events/${eventId}/snapshot${token ? `?jwt=${encodeURIComponent(token)}` : ''}`
+}
+
 export default function EventsPage() {
   const [page, setPage] = useState(1)
-  const { data, loading, refetch } = useAsync<any>(() => eventsAPI.list({ page, page_size: 20 }), [page])
+  // Фильтр «только со снимками»: основная задача — просмотр кадров детекции,
+  // события без картинки в этом режиме только мешают.
+  const [onlySnapshots, setOnlySnapshots] = useState(false)
+  // Класс объекта для фильтра: лицо, номер, человек...
+  const [objectClass, setObjectClass] = useState('')
+  // Снимок, открытый на весь экран
+  const [preview, setPreview] = useState<DetectionEvent | null>(null)
 
-  const events: DetectionEvent[] = data?.events || []
+  const { data, loading, refetch } = useAsync<any>(
+    () => eventsAPI.list({ page, page_size: 20, object_class: objectClass || undefined }),
+    [page, objectClass],
+  )
+
+  const allEvents: DetectionEvent[] = data?.events || []
+  // Фильтр «со снимками» применяем на клиенте: снимок хранится в самом событии,
+  // а отдельный фильтр в API не нужен ради одного чекбокса.
+  const events = onlySnapshots ? allEvents.filter(hasSnapshot) : allEvents
   const total = data?.total || 0
   const totalPages = Math.ceil(total / 20)
 
@@ -39,6 +64,44 @@ export default function EventsPage() {
         <button className="btn btn-outline btn-sm" onClick={refetch}>
           Обновить
         </button>
+      </div>
+
+      {/* Фильтры: снимки сохраняются не для каждого события, поэтому
+          основной сценарий — «покажи только то, где есть кадр». */}
+      <div className="card" style={{ marginBottom: 16, display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={onlySnapshots}
+            onChange={(e) => setOnlySnapshots(e.target.checked)}
+          />
+          Только со снимками
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <label style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Объект:</label>
+          <select
+            className="input"
+            style={{ width: 160 }}
+            value={objectClass}
+            onChange={(e) => { setObjectClass(e.target.value); setPage(1) }}
+          >
+            <option value="">Все</option>
+            <option value="person">Люди</option>
+            <option value="car">Автомобили</option>
+            <option value="plate">Номера</option>
+            <option value="face">Лица</option>
+            <option value="truck">Грузовики</option>
+            <option value="bus">Автобусы</option>
+            <option value="motorcycle">Мотоциклы</option>
+            <option value="dog">Собаки</option>
+            <option value="cat">Кошки</option>
+          </select>
+        </div>
+        {onlySnapshots && (
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            найдено {events.length} из {allEvents.length} на странице
+          </span>
+        )}
       </div>
 
       {events.length === 0 ? (
@@ -58,8 +121,7 @@ export default function EventsPage() {
                   <th>Камера</th>
                   <th>Снимок</th>
                 </tr>
-              </thead>
-              <tbody>
+              </thead>              <tbody>
                 {events.map((ev) => {
                   const Icon = classIcons[ev.object_class] || Eye
                   const color = classColors[ev.object_class] || 'var(--text-secondary)'
@@ -91,8 +153,21 @@ export default function EventsPage() {
                         {ev.camera_name || ev.camera_id.slice(0, 8)}
                       </td>
                       <td>
-                        {ev.thumbnail_path ? (
-                          <img src={ev.thumbnail_path} alt="thumb" style={{ width: 80, height: 45, borderRadius: 4, objectFit: 'cover' }} />
+                        {/* Снимок отдаётся отдельным эндпоинтом: <img> не может
+                            передать заголовок Authorization, поэтому токен в query.
+                            Клик открывает кадр в полном размере. */}
+                        {hasSnapshot(ev) ? (
+                          <img
+                            src={snapshotSrc(ev.id)}
+                            alt="снимок события"
+                            loading="lazy"
+                            onClick={() => setPreview(ev)}
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                            style={{
+                              width: 120, height: 68, borderRadius: 4, objectFit: 'cover',
+                              border: '1px solid var(--border)', cursor: 'pointer',
+                            }}
+                          />
                         ) : (
                           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>—</span>
                         )}
@@ -104,6 +179,13 @@ export default function EventsPage() {
             </table>
           </div>
         </div>
+      )}
+
+      {preview && (
+        <SnapshotModal
+          event={preview}
+          onClose={() => setPreview(null)}
+        />
       )}
 
       {/* Пагинация */}
@@ -120,6 +202,93 @@ export default function EventsPage() {
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+// SnapshotModal показывает снимок события в полном размере.
+//
+// Рядом выводим, что именно распознано: для номеров — текст, для лиц —
+// имя из справочника. Это и есть польза снимка — понять, что попало в кадр.
+function SnapshotModal({ event, onClose }: { event: DetectionEvent; onClose: () => void }) {
+  const src = snapshotSrc(event.id)
+  // Текст номера детектор кладёт в метаданные события
+  const plateText = (event.metadata as any)?.plate_text as string | undefined
+  const trigger = (event as any).trigger_type as TriggerType | undefined
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="card"
+        style={{ maxWidth: 900, width: '100%', padding: 16 }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15 }}>
+              {event.camera_name || event.camera_id.slice(0, 8)}
+            </h3>
+            <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--text-secondary)' }}>
+              {new Date(event.timestamp).toLocaleString('ru')}
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {/* Скачивание: ссылка та же, но с атрибутом download */}
+            <a
+              href={src}
+              download={`snapshot_${event.id.slice(0, 8)}.jpg`}
+              className="btn btn-outline btn-sm"
+              style={{ textDecoration: 'none' }}
+            >
+              <Download size={14} /> Скачать
+            </a>
+            <button className="btn btn-outline btn-sm" onClick={onClose}>
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+
+        <img
+          src={src}
+          alt="снимок события"
+          style={{ width: '100%', borderRadius: 6, background: '#000', maxHeight: '70vh', objectFit: 'contain' }}
+        />
+
+        {/* Расшифровка результата — что именно обнаружено на кадре */}
+        <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap', fontSize: 13 }}>
+          <span>
+            <span style={{ color: 'var(--text-secondary)' }}>Объект: </span>
+            {event.object_class}
+          </span>
+          <span>
+            <span style={{ color: 'var(--text-secondary)' }}>Точность: </span>
+            {(event.confidence * 100).toFixed(0)}%
+          </span>
+          {plateText && (
+            <span>
+              <span style={{ color: 'var(--text-secondary)' }}>Номер: </span>
+              <strong style={{ fontFamily: 'monospace' }}>{plateText}</strong>
+            </span>
+          )}
+          {event.match_type && event.match_type !== 'unknown' && (
+            <span style={{ color: event.match_type === 'blocked' ? 'var(--danger)' : 'var(--success)' }}>
+              {event.match_type === 'blocked' ? 'Заблокирован' : 'Из справочника'}
+              {event.matched_name ? `: ${event.matched_name}` : ''}
+            </span>
+          )}
+          {trigger && (
+            <span style={{ color: 'var(--text-secondary)' }}>
+              Триггер: {TRIGGER_LABELS[trigger] || trigger}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

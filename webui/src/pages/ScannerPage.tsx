@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { scannerAPI, camerasAPI, type DiscoveredCamera, type ScanResult } from '../api/client'
+import { scannerAPI, camerasAPI, type DiscoveredCamera, type ScanResult, type StreamProbeResult } from '../api/client'
 import { useToast } from '../context/ToastContext'
-import { Search, Wifi, Plus, Check, Loader2, Camera } from 'lucide-react'
+import { Search, Wifi, Plus, Check, Loader2, Camera, PlugZap, Volume2, VolumeX, XCircle } from 'lucide-react'
 
 export default function ScannerPage() {
   const toast = useToast()
@@ -12,6 +12,9 @@ export default function ScannerPage() {
   const [result, setResult] = useState<ScanResult | null>(null)
   const [adding, setAdding] = useState<Set<string>>(new Set())
   const [added, setAdded] = useState<Set<string>>(new Set())
+  // Результаты проверки потоков по IP: показывают кодек, разрешение и звук.
+  const [probes, setProbes] = useState<Record<string, StreamProbeResult>>({})
+  const [probing, setProbing] = useState<Set<string>>(new Set())
 
   const handleScan = async () => {
     setScanning(true)
@@ -24,6 +27,37 @@ export default function ScannerPage() {
       toast.error(err.response?.data?.error || 'Ошибка сканирования')
     } finally {
       setScanning(false)
+    }
+  }
+
+  /**
+   * Проверяет основной поток найденной камеры.
+   *
+   * Сканер подтверждает, что камера отвечает по IP, но не проверяет
+   * конкретный путь потока и наличие звука. Поэтому оператор может
+   * добавить камеру и только потом узнать, что звука нет или выбран
+   * не тот поток — проверка до добавления это исключает.
+   */
+  const handleProbe = async (cam: DiscoveredCamera) => {
+    setProbing((s) => new Set(s).add(cam.ip))
+    try {
+      const res = await camerasAPI.probeStream({
+        rtsp_url: cam.main_stream,
+        username,
+        password,
+      })
+      setProbes((prev) => ({ ...prev, [cam.ip]: res.data }))
+    } catch {
+      setProbes((prev) => ({
+        ...prev,
+        [cam.ip]: { ok: false, message: 'не удалось проверить поток', has_audio: false },
+      }))
+    } finally {
+      setProbing((s) => {
+        const ns = new Set(s)
+        ns.delete(cam.ip)
+        return ns
+      })
     }
   }
 
@@ -133,12 +167,14 @@ export default function ScannerPage() {
                     <th>Модель</th>
                     <th>Прошивка</th>
                     <th>MAC</th>
-                    <th>Потоки</th>
+                    <th>Проверка</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(result.cameras || []).map((cam) => (
+                  {(result.cameras || []).map((cam) => {
+                    const probe = probes[cam.ip]
+                    return (
                     <tr key={cam.ip}>
                       <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -149,8 +185,35 @@ export default function ScannerPage() {
                       <td>{cam.model || '—'}</td>
                       <td style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{cam.firmware || '—'}</td>
                       <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{cam.mac || '—'}</td>
-                      <td style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
-                        main + sub
+                      <td>
+                        {/* Проверка потока: кодек, разрешение и наличие звука. */}
+                        {!probe ? (
+                          <button
+                            className="btn btn-outline btn-sm"
+                            onClick={() => handleProbe(cam)}
+                            disabled={probing.has(cam.ip)}
+                            style={{ padding: '3px 10px', fontSize: 12 }}
+                          >
+                            {probing.has(cam.ip)
+                              ? <Loader2 size={13} className="spin" />
+                              : <PlugZap size={13} />}
+                            {probing.has(cam.ip) ? 'Проверка...' : 'Проверить'}
+                          </button>
+                        ) : probe.ok ? (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--success)' }}>
+                            {probe.has_audio ? <Volume2 size={13} /> : <VolumeX size={13} />}
+                            <span>
+                              {probe.codec?.toUpperCase()}
+                              {probe.width ? ` ${probe.width}×${probe.height}` : ''}
+                            </span>
+                          </span>
+                        ) : (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--danger)' }}
+                            title={probe.message}>
+                            <XCircle size={13} />
+                            {probe.message}
+                          </span>
+                        )}
                       </td>
                       <td>
                         {added.has(cam.ip) ? (
@@ -174,7 +237,8 @@ export default function ScannerPage() {
                         )}
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

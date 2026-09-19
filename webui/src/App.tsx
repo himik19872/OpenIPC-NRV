@@ -7,8 +7,11 @@ import CamerasPage from './pages/CamerasPage'
 import CameraDetailPage from './pages/CameraDetailPage'
 import ScannerPage from './pages/ScannerPage'
 import EventsPage from './pages/EventsPage'
+import AudioEventsPage from './pages/AudioEventsPage'
 import RecordingsPage from './pages/RecordingsPage'
+import RecognitionPage from './pages/RecognitionPage'
 import ACSPage from './pages/ACSPage'
+import SettingsPage from './pages/SettingsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth()
@@ -35,8 +38,11 @@ export default function App() {
                 <Route path="/cameras/:id" element={<CameraDetailPage />} />
                 <Route path="/scanner" element={<ScannerPage />} />
                 <Route path="/events" element={<EventsPage />} />
+                <Route path="/audio-events" element={<AudioEventsPage />} />
                 <Route path="/recordings" element={<RecordingsPage />} />
+                <Route path="/recognition" element={<RecognitionPage />} />
                 <Route path="/acs" element={<ACSPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </Layout>
           </ProtectedRoute>

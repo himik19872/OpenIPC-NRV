@@ -24,14 +24,18 @@ type credentialPair struct {
 	Password string
 }
 
-// defaultCredentialList — список учётных данных для перебора при сканировании
+// defaultCredentialList — список учётных данных для перебора при сканировании.
+//
+// Это распространённые заводские пары, а не пароли конкретной инсталляции:
+// перебор нужен, чтобы оператор не вводил логин и пароль для каждой камеры
+// вручную. Свой пароль можно передать явно в запросе сканирования.
 var defaultCredentialList = []credentialPair{
-	{"root", "96811621q"}, // OpenIPC (основной)
-	{"admin", "admin"},    // Hikvision/Dahua/OpenIPC
-	{"admin", "12345"},    // Hikvision альтернативный
-	{"admin", "123456"},   // Hikvision/Dahua
-	{"admin", ""},         // без пароля
-	{"root", "admin"},     // редко, но бывает
+	{"root", "12345"},   // OpenIPC
+	{"admin", "admin"},  // Hikvision/Dahua/OpenIPC
+	{"admin", "12345"},  // Hikvision альтернативный
+	{"admin", "123456"}, // Hikvision/Dahua
+	{"root", "root"},    // распространённый заводской
+	{"admin", ""},       // без пароля
 }
 
 // CameraScanner — мультивендорный сканер IP-камер

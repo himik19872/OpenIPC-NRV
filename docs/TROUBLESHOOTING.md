@@ -98,11 +98,11 @@ ffprobe -v error -rtsp_transport tcp -timeout 5000000 \
 | `method DESCRIBE failed` | Ошибка протокола | Проверьте путь потока (`stream=0`) |
 
 **Важно:** у камер могут быть **разные** учётные данные, даже одной модели.
-Перебор для поиска рабочих:
+Перебор для поиска рабочих (подставьте свои значения):
 
 ```bash
 IP=192.168.1.10
-for CRED in "root:96811621q" "admin:12345" "admin:96811621q" "admin:admin"; do
+for CRED in "root:ПАРОЛЬ1" "admin:ПАРОЛЬ2" "admin:12345" "admin:admin"; do
   U="${CRED%%:*}"; P="${CRED##*:}"
   printf "%-22s " "$CRED"
   timeout 8 ffprobe -v error -rtsp_transport tcp \

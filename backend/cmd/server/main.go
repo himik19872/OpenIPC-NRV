@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nvr/backend/internal/api"
 	"github.com/nvr/backend/internal/config"
+	"github.com/nvr/backend/internal/domain"
 	natspkg "github.com/nvr/backend/internal/nats"
 	miniorepo "github.com/nvr/backend/internal/repository/minio"
 	"github.com/nvr/backend/internal/repository/postgres"
@@ -52,6 +54,8 @@ func main() {
 	eventRepo := postgres.NewEventRepo(db)
 	acsRepo := postgres.NewACSRepo(db)
 	userRepo := postgres.NewUserRepo(db)
+	// Настройки детекции и хранилища нужны и API, и подписчику событий.
+	detectionSettingsRepo := postgres.NewDetectionSettingsRepo(db)
 
 	// Инициализация сервисов
 	// MediaMTX API: если MEDIAMTX_HOST = "localhost:8888", то API = "http://localhost:9997"
@@ -73,17 +77,24 @@ func main() {
 	}
 
 	// NATS Detection Subscriber (сохраняет AI детекции в БД)
+	// Объявлен заранее: хранилище снимков появится после инициализации MinIO.
+	var detSubscriber *natspkg.DetectionSubscriber
 	if cfg.NatsURL != "" {
 		detSub, err := natspkg.NewDetectionSubscriber(cfg.NatsURL, db)
 		if err != nil {
 			log.Warn().Err(err).Str("url", cfg.NatsURL).Msg("nats detection subscriber init failed, continuing without")
 		} else {
+			// Хранилище снимков подключаем после инициализации MinIO (ниже),
+			// поэтому создаём подписчик сейчас, а saver добавляем позже.
+			defer detSub.Close()
 			go func() {
+				// Даём MinIO время проинициализироваться, затем стартуем.
+				time.Sleep(500 * time.Millisecond)
 				if err := detSub.Start(context.Background()); err != nil {
 					log.Error().Err(err).Msg("nats detection subscriber failed")
 				}
 			}()
-			defer detSub.Close()
+			detSubscriber = detSub
 		}
 	}
 
@@ -104,12 +115,96 @@ func main() {
 		videoRepo = nil
 	}
 
+	// Хранилище снимков и записей: работает поверх MinIO или локального диска
+	// в зависимости от настроек сервера.
+	storageSvc := service.NewStorageService(detectionSettingsRepo, videoRepo)
+	if detSubscriber != nil {
+		detSubscriber.WithStorage(storageSvc)
+	}
+
+	// Распознавание лиц и автомобильных номеров: справочники сопоставляются
+	// с событиями, результат попадает в detection_events и в триггер записи.
+	recognitionRepo := postgres.NewRecognitionRepo(db)
+	recognitionSvc := service.NewRecognitionService(recognitionRepo)
+	if detSubscriber != nil {
+		detSubscriber.WithRecognition(recognitionSvc)
+	}
+
+	// Запись видео: ffmpeg пишет сегменты, менеджер собирает клипы по событиям.
+	recorderSvc := service.NewRecorderService(cfg.RecordBufferDir, storageSvc)
+	recordingMgr := service.NewRecordingManager(detectionSettingsRepo, recorderSvc, storageSvc, cameraSvc)
+	recordingMgr.OnSaved(func(clip service.SavedClip) {
+		half := time.Duration(clip.DurationSec) * time.Second / 2
+		if _, err := db.Exec(context.Background(), `
+			INSERT INTO recordings (id, camera_id, start_time, end_time, file_path, file_size,
+			                        resolution, codec, event_triggered, trigger_type, trigger_detail)
+			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), true, $9, $10)`,
+			uuid.New(), clip.CameraID,
+			clip.EventTime.Add(-half), clip.EventTime.Add(half),
+			clip.Path, clip.Size, clip.Resolution, clip.Codec,
+			triggerTypeOrDefault(clip.TriggerType), clip.TriggerDetail); err != nil {
+			log.Error().Err(err).Str("camera_id", clip.CameraID.String()[:8]).
+				Msg("не удалось сохранить запись в БД")
+		}
+	})
+	if detSubscriber != nil {
+		detSubscriber.WithRecording(recordingMgr)
+	}
+
+	// Фоновый цикл записи: синхронизирует режимы и чистит буфер сегментов.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			recordingMgr.Sync(context.Background())
+			recorderSvc.PruneBuffer()
+		}
+	}()
+
+	// Автоочистка архива по глубине хранения из настроек сервера.
+	// Запускается редко: удаление старых файлов не требует частых проходов.
+	retentionSvc := service.NewRetentionService(storageSvc, postgres.NewRetentionRepo(db))
+	go func() {
+		// Первый проход через минуту после старта, дальше раз в час.
+		time.Sleep(time.Minute)
+		for {
+			if cfg, err := detectionSettingsRepo.GetServerSettings(context.Background()); err == nil {
+				if n, freed := retentionSvc.RunOnce(context.Background(), cfg); n > 0 {
+					log.Info().Int("deleted", n).Int64("freed_bytes", freed).
+						Msg("автоочистка архива завершена")
+				}
+			}
+			time.Sleep(time.Hour)
+		}
+	}()
+
+	// Звук с камер: камеры отдают G.711, а браузеры его в HLS не воспроизводят.
+	// Сервис перекодирует звук в AAC отдельными процессами ffmpeg.
+	audioSvc := service.NewAudioService(cfg.MediamtxHost, cfg.AudioClipDir).
+		WithPathRegistrar(cameraSvc.AddPublisherPath)
+	audioRepo := postgres.NewAudioRepo(db)
+	go func() {
+		// Первый проход с задержкой: камеры в MediaMTX регистрируются
+		// не мгновенно, до этого момента звуковой дорожки ещё нет.
+		time.Sleep(20 * time.Second)
+		// Интервал небольшой: путь звука в MediaMTX живёт в памяти и теряется
+		// при перезагрузке его конфигурации. Цикл пересоздаёт и путь, и процесс.
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			syncAudio(audioSvc, audioRepo, cameraSvc)
+		}
+	}()
+
 	// Восстанавливаем пути камер в MediaMTX: они хранятся в памяти MediaMTX
 	// и теряются при его перезапуске, поэтому перерегистрируем их при старте.
 	cameraSvc.RestoreStreams(context.Background())
 
-	// Монитор доступности камер: опрашивает MediaMTX и обновляет status в БД
-	statusMonitor := service.NewCameraStatusMonitor(cameraRepo, mediamtxAPI)
+	// Монитор доступности камер: опрашивает MediaMTX и обновляет status в БД.
+	// Он же восстанавливает пути, если MediaMTX был перезапущен и потерял
+	// конфигурацию (она хранится в памяти MediaMTX, а не на диске).
+	statusMonitor := service.NewCameraStatusMonitor(cameraRepo, mediamtxAPI).
+		WithRestore(cameraSvc.RegisterStreams)
 	go statusMonitor.Start(context.Background())
 
 	// Инициализация роутера
@@ -124,6 +219,9 @@ func main() {
 		MediamtxHost: cfg.MediamtxHost,
 		Scanner:      scanner,
 		VideoRepo:    videoRepo,
+		StorageSvc:   storageSvc,
+		RetentionSvc: retentionSvc,
+		AudioSvc:     audioSvc,
 	})
 
 	// HTTP-сервер
@@ -157,4 +255,68 @@ func main() {
 	}
 
 	log.Info().Msg("server stopped")
+}
+
+// syncAudio приводит процессы транскодирования звука в соответствие
+// с настройками камер: запускает там, где звук нужен, и останавливает,
+// где он выключен или у камеры нет микрофона.
+//
+// Проверка кодека (ffprobe) выполняется только при ПЕРВОМ запуске камеры,
+// а не на каждом проходе: это отдельное подключение к камере, и повторять
+// его каждые 30 секунд слишком дорого.
+func syncAudio(audioSvc *service.AudioService, repo *postgres.AudioRepo, cameras *service.CameraService) {
+	settings, err := repo.ListWithMicrophone(context.Background())
+	if err != nil {
+		log.Warn().Err(err).Msg("не удалось получить настройки звука")
+		return
+	}
+
+	// Камеры, которым звук нужен сейчас
+	want := make(map[string]bool, len(settings))
+	for _, s := range settings {
+		want[s.CameraID.String()] = true
+	}
+
+	// Останавливаем транскодирование там, где оно больше не нужно
+	for _, id := range audioSvc.ActiveCameras() {
+		if !want[id.String()] {
+			audioSvc.StopTranscode(id)
+		}
+	}
+
+	for _, s := range settings {
+		if audioSvc.IsTranscoding(s.CameraID) {
+			continue
+		}
+		if !s.Transcode {
+			// Камера отдаёт Opus или AAC — браузер проиграет звук как есть,
+			// перекодировать не нужно (HLS соберёт MediaMTX сам).
+			continue
+		}
+
+		// Проверяем наличие звука в самом пути MediaMTX, а не в камере:
+		// многие камеры отдают RTSP-аудио только одному клиенту, и
+		// параллельное подключение к камере зависает на десятки секунд,
+		// ломая заодно и видео. В пути MediaMTX дорожка уже есть.
+		sourcePath := s.CameraID.String()
+		if codec := audioSvc.AudioCodecInPath(sourcePath); codec == "" {
+			log.Debug().Str("camera_id", s.CameraID.String()[:8]).
+				Msg("в потоке нет звуковой дорожки — звук не запускается")
+			continue
+		}
+
+		if err := audioSvc.StartTranscode(s.CameraID, sourcePath, ""); err != nil {
+			log.Warn().Err(err).Str("camera_id", s.CameraID.String()[:8]).
+				Msg("не удалось запустить транскодирование звука")
+		}
+	}
+}
+
+// triggerTypeOrDefault возвращает тип триггера, подставляя 'event' для пустого
+// значения. Так запись не останется без причины, даже если триггер не определён.
+func triggerTypeOrDefault(t domain.TriggerType) string {
+	if t == "" {
+		return string(domain.TriggerObject)
+	}
+	return string(t)
 }
