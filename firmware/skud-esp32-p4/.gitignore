@@ -1,0 +1,8 @@
+# Артефакты сборки ESP-IDF и зависимости — не коммитим
+build/
+managed_components/
+dependencies.lock
+
+# Сгенерированный конфиг (создаётся idf.py из sdkconfig.defaults)
+sdkconfig
+sdkconfig.old

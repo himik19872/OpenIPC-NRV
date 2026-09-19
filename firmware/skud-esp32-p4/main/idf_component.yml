@@ -1,0 +1,7 @@
+dependencies:
+  idf: ">=5.0"
+  espressif/cjson: "*"
+  espressif/ip101: "*"
+  joltwallet/littlefs: "*"
+
+description: SKUD controller application

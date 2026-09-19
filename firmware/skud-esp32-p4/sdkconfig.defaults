@@ -1,0 +1,45 @@
+# SDK configuration defaults for SKUD controller on ESP32-P4
+CONFIG_IDF_TARGET="esp32p4"
+
+# Waveshare ESP32-P4 boards use silicon rev <3.0 (v1.x)
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# Early rev v1.3 silicon: max supported CPU freq is 360 MHz (400 MHz unsupported)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+
+# --- NVS ---
+
+# --- Ethernet ---
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_SPI_ETHERNET=n
+CONFIG_ETH_USE_OPENETH=n
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+# --- ESP-NETIF ---
+CONFIG_ESP_NETIF_L2_TAP=n
+
+# --- HTTP Server ---
+
+# --- Event loop ---
+CONFIG_ESP_EVENT_LOOP_PROFILING=n
+
+# --- Logging ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+
+# --- FreeRTOS ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- cJSON enabled via idf_component.yml ---
+
+# --- Flash: 16MB + custom partition table + OTA ---
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- LittleFS ---
+CONFIG_LITTLEFS_PAGE_SIZE=256
+CONFIG_LITTLEFS_BLOCK_SIZE=4096
