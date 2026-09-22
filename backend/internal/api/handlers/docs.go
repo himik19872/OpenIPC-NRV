@@ -172,6 +172,8 @@ func buildRouteList() []APIDoc {
 			QueryParams: []string{"page", "page_size"}},
 		{Method: "POST", Path: "/api/v1/acs/doors/{controllerID}/open", Summary: "Открыть дверь", Auth: true, Tags: []string{"acs"},
 			Body: `{"door_id":"1"}`},
+		{Method: "POST", Path: "/api/v1/acs/ingest", Summary: "Приём события от контроллера (push)", Auth: false, Tags: []string{"acs"},
+			Body: `{"device_id":"SKUD-01","event_type":"access_granted","card_number":"1:12345","timestamp":1789857349}`},
 
 		// --- Сканер камер ---
 		{Method: "POST", Path: "/api/v1/scanner/scan", Summary: "Сканирование подсети в поиске камер", Auth: true, Tags: []string{"scanner"},

@@ -56,17 +56,21 @@ ai-detector/models/
 # --- Прошивка СКУД-контроллера (ESP32-P4) ---
 # Артефакты сборки ESP-IDF: каталог build занимает сотни мегабайт
 # и полностью пересоздаётся командой idf.py build.
-skud-esp34-p4/build/
+firmware/skud-esp32-p4/build/
 # Компоненты, скачанные менеджером зависимостей: восстанавливаются
 # по dependencies.lock и idf_component.yml.
-skud-esp34-p4/managed_components/
-skud-esp34-p4/sdkconfig.old
+firmware/skud-esp32-p4/managed_components/
+firmware/skud-esp32-p4/sdkconfig
+firmware/skud-esp32-p4/sdkconfig.old
+firmware/skud-esp32-p4/dependencies.lock
+# Готовые образы прошивки: собираются локально и не хранятся в репозитории.
+firmware/skud-esp32-p4/*.bin
 # Документация и материалы производителя: в репозитории не нужны.
-skud-esp34-p4/*.pdf
-skud-esp34-p4/*.jpg
-skud-esp34-p4/*-DEV-KIT*.html
-skud-esp34-p4/*_files/
-skud-esp34-p4/*.bin
+firmware/skud-esp32-p4/*.pdf
+firmware/skud-esp32-p4/*.jpg
+firmware/skud-esp32-p4/*-DEV-KIT*.html
+firmware/skud-esp32-p4/*_files/
+firmware/skud-esp32-p4/.vscode/
 
 # Дампы схем и парсера документации
 schema_dump.txt

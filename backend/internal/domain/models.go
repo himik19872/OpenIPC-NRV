@@ -634,6 +634,25 @@ type OpenDoorRequest struct {
 	DoorID string `json:"door_id" validate:"required"`
 }
 
+// IngestACSEventRequest — событие, которое контроллер СКУД сам присылает
+// на сервер (push-канал). Поля соответствуют тому, что отдаёт прошивка
+// контроллера: facility+card_number образуют код Wiegand, flags — битовую
+// маску (например, «дверь открыта по карте» или «дверь взломана»).
+//
+// ControllerID в запросе нет намеренно: контроллер не знает своего UUID
+// в базе, сервер сопоставляет его по IP отправителя.
+type IngestACSEventRequest struct {
+	DeviceID   string         `json:"device_id"`
+	EventType  string         `json:"event_type"`
+	Facility   int            `json:"facility"`
+	CardNumber string         `json:"card_number"`
+	Name       string         `json:"name"`
+	DoorID     string         `json:"door_id"`
+	Timestamp  int64          `json:"timestamp"`
+	Flags      int            `json:"flags"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
 // PaginatedEventResponse — пагинированный список событий
 type PaginatedEvents struct {
 	Events   []DetectionEvent `json:"events"`

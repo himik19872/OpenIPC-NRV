@@ -104,6 +104,38 @@ func (r *ACSRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+// FindByIP находит контроллер по IP-адресу отправителя.
+//
+// Нужен для push-канала: контроллер сам присылает событие на сервер и не
+// знает своего UUID (он выдаётся при регистрации в интерфейсе), поэтому
+// единственная зацепка — адрес, с которого пришёл запрос.
+func (r *ACSRepo) FindByIP(ctx context.Context, ip string) (*domain.ACSController, error) {
+	var c domain.ACSController
+	var cfg, creds, capEvents []byte
+	// host(ip) — по той же причине, что и в List: тип inet возвращает маску.
+	err := r.db.QueryRow(ctx, `
+		SELECT id, name, vendor, host(ip), port, credentials, site_id,
+		       COALESCE(status, 'offline'), config, camera_id,
+		       capture_mode, capture_events, clip_seconds, created_at
+		FROM acs_controllers WHERE host(ip) = $1 LIMIT 1
+	`, ip).Scan(&c.ID, &c.Name, &c.Vendor, &c.IP, &c.Port,
+		&creds, &c.SiteID, &c.Status, &cfg, &c.CameraID,
+		&c.CaptureMode, &capEvents, &c.ClipSeconds, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		json.Unmarshal(cfg, &c.Config)
+	}
+	if creds != nil {
+		json.Unmarshal(creds, &c.Credentials)
+	}
+	if capEvents != nil {
+		json.Unmarshal(capEvents, &c.CaptureEvents)
+	}
+	return &c, nil
+}
+
 // SetStatus сохраняет результат проверки доступности контроллера.
 // Ошибки не возвращаем: это вспомогательная запись, и её сбой не должен
 // ломать выдачу списка контроллеров.

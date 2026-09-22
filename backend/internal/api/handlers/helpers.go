@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // maxRequestBody — предел размера тела запроса.
@@ -44,4 +45,22 @@ func credentialsFromSettings(settings map[string]any) (string, string) {
 	username, _ := settings["username"].(string)
 	password, _ := settings["password"].(string)
 	return username, password
+}
+
+// clientIP возвращает IP клиента.
+//
+// r.RemoteAddr — это адрес узла, который физически подключился, то есть при
+// работе через прокси там будет адрес прокси. RealIP-middleware кладёт
+// настоящий адрес в X-Real-IP, поэтому сначала смотрим туда. Порт отрезаем:
+// сравнивать адреса удобнее без него.
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+		return ip
+	}
+	host := r.RemoteAddr
+	// Адрес приходит в формате "ip:port"; IPv6 — в квадратных скобках.
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		return strings.Trim(host[:i], "[]")
+	}
+	return host
 }

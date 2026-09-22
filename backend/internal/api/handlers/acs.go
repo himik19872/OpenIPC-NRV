@@ -101,6 +101,30 @@ func (h *ACSHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// IngestEvent принимает событие, которое контроллер СКУД прислал сам.
+//
+// Маршрут открыт без JWT: у контроллера нет учётной записи на сервере.
+// Контроллер опознаётся по IP отправителя, поэтому подделать событие
+// может только тот, кто уже находится в доверенной сети.
+func (h *ACSHandler) IngestEvent(w http.ResponseWriter, r *http.Request) {
+	var req domain.IngestACSEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if req.EventType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "event_type required"})
+		return
+	}
+
+	ev, err := h.svc.IngestEvent(r.Context(), req, clientIP(r))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, ev)
+}
+
 func (h *ACSHandler) OpenDoor(w http.ResponseWriter, r *http.Request) {
 	controllerID, err := uuid.Parse(chi.URLParam(r, "controllerID"))
 	if err != nil {
