@@ -1,10 +1,81 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { camerasAPI, Camera } from '../api/client'
+import { camerasAPI, Camera, CameraHealth } from '../api/client'
 import { useAsync } from '../hooks/useApi'
 import { useToast } from '../context/ToastContext'
-import Hls from 'hls.js'
-import { Plus, Trash2, RefreshCw, Eye, Radio, Wifi, WifiOff } from 'lucide-react'
+import { Plus, Trash2, RefreshCw, Eye, Radio, Wifi, WifiOff, Activity, AlertTriangle } from 'lucide-react'
+
+// Цвет и подпись для уровня здоровья камеры. Один источник правды, чтобы
+// карточка и подсказка не расходились.
+const HEALTH_STYLE: Record<CameraHealth['level'], { color: string; label: string }> = {
+  ok:       { color: 'var(--success, #22c55e)', label: 'норма' },
+  warning:  { color: 'var(--warning, #f59e0b)', label: 'внимание' },
+  critical: { color: 'var(--danger, #ef4444)',  label: 'проблема' },
+  unknown:  { color: 'var(--text-secondary)',   label: 'нет данных' },
+}
+
+// Очередь запросов кадров. Камеры слабые: если открыть список из 19 плиток,
+// браузер отправит 19 запросов одновременно, и камеры начнут отклонять их
+// (проверено — при параллельных запросах кадры не приходят даже с камер,
+// которые поодиночке отвечают стабильно).
+//
+// Поэтому запросы идут по несколько за раз: так плитки наполняются
+// последовательно, но каждая камера получает запрос без конкуренции.
+const PREVIEW_CONCURRENCY = 3
+let previewRunning = 0
+const previewQueue: (() => void)[] = []
+
+function acquirePreviewSlot(): Promise<void> {
+  if (previewRunning < PREVIEW_CONCURRENCY) {
+    previewRunning++
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => previewQueue.push(resolve))
+}
+
+function releasePreviewSlot() {
+  const next = previewQueue.shift()
+  if (next) {
+    next()
+    return
+  }
+  previewRunning--
+}
+
+// Плашка здоровья камеры: загрузка CPU, свободная память и fps сенсора.
+// Показывается только для камер с Majestic — для остальных метрик нет.
+function HealthBadge({ health }: { health?: CameraHealth }) {
+  if (!health || !health.supported) return null
+  const style = HEALTH_STYLE[health.level] ?? HEALTH_STYLE.unknown
+  const mem = health.mem_available_mb != null ? `${health.mem_available_mb.toFixed(0)} МБ` : '—'
+
+  return (
+    <div
+      title={[
+        `Состояние: ${style.label}`,
+        health.load1 != null ? `Загрузка CPU: ${health.load1.toFixed(2)}` : null,
+        `Свободно памяти: ${mem}`,
+        health.isp_fps != null ? `FPS сенсора: ${health.isp_fps}` : null,
+        health.rtsp_clients != null ? `Клиентов RTSP: ${health.rtsp_clients}` : null,
+        health.rtsp_mbps ? `Отдача: ${health.rtsp_mbps.toFixed(1)} Мбит/с` : null,
+        health.night_enabled ? 'Ночной режим: включён' : null,
+        health.issues?.length ? `Проблемы: ${health.issues.join('; ')}` : null,
+      ].filter(Boolean).join('\n')}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 5,
+        background: 'rgba(0,0,0,0.65)', color: '#fff',
+        fontSize: 10, padding: '2px 7px', borderRadius: 4,
+      }}
+    >
+      {health.level === 'ok'
+        ? <Activity size={10} style={{ color: style.color }} />
+        : <AlertTriangle size={10} style={{ color: style.color }} />}
+      <span>load {health.load1 != null ? health.load1.toFixed(1) : '—'}</span>
+      <span style={{ opacity: 0.5 }}>·</span>
+      <span>{mem}</span>
+    </div>
+  )
+}
 
 export default function CamerasPage() {
   const navigate = useNavigate()
@@ -17,6 +88,18 @@ export default function CamerasPage() {
   })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+
+  // Здоровье камер тянем отдельным запросом: сервер собирает его раз в
+  // минуту, поэтому список и метрики можно обновлять независимо.
+  const { data: healthList, refetch: refetchHealth } = useAsync<CameraHealth[]>(
+    () => camerasAPI.health(),
+  )
+  const healthByCamera = new Map<string, CameraHealth>(
+    (healthList ?? []).map((h) => [h.camera_id, h]),
+  )
+  const problemCount = (healthList ?? []).filter(
+    (h) => h.level === 'critical' || h.level === 'warning',
+  ).length
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -58,10 +141,20 @@ export default function CamerasPage() {
       <div className="page-header">
         <div>
           <h1>Камеры</h1>
-          <p>Управление подключёнными камерами OpenIPC</p>
+          <p>
+            Управление подключёнными камерами OpenIPC
+            {problemCount > 0 && (
+              <span style={{ color: 'var(--warning, #f59e0b)', marginLeft: 8 }}>
+                • требуют внимания: {problemCount}
+              </span>
+            )}
+          </p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-outline btn-sm" onClick={refetch}>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => { refetch(); refetchHealth() }}
+          >
             <RefreshCw size={16} />
             Обновить
           </button>
@@ -83,7 +176,6 @@ export default function CamerasPage() {
         <div className="grid grid-3">
           {cameras.map((cam) => {
             const isOnline = cam.status === 'online' || cam.status === 'recording'
-            const hasSubStream = !!(cam.sub_stream)
             const hasMainStream = !!(cam.main_stream || cam.rtsp_url)
 
             return (
@@ -103,10 +195,9 @@ export default function CamerasPage() {
 
               {/* Превью: живой субпоток, при неудаче — статичный кадр */}
               <div className="video-placeholder" style={{ position: 'relative', minHeight: 160 }}>
-                {isOnline && hasSubStream && (
-                  <CameraThumb id={cam.id} hlsUrl={`/api/v1/cameras/${cam.id}/hls/sub/index.m3u8`} />
+                {isOnline && (
+                  <CameraThumb id={cam.id} name={cam.name} />
                 )}
-                {isOnline && !hasSubStream && <SnapshotImage id={cam.id} name={cam.name} />}
                 {!isOnline && (
                   <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <WifiOff size={28} style={{ color: 'var(--text-secondary)', opacity: 0.4 }} />
@@ -122,12 +213,6 @@ export default function CamerasPage() {
                       fontSize: 10, padding: '2px 6px', borderRadius: 4,
                     }}>main</span>
                   )}
-                  {hasSubStream && (
-                    <span style={{
-                      background: 'rgba(59,130,246,0.7)', color: '#fff',
-                      fontSize: 10, padding: '2px 6px', borderRadius: 4,
-                    }}>sub</span>
-                  )}
                 </div>
                 <div style={{ position: 'absolute', top: 8, right: 8 }}>
                   {isOnline ? (
@@ -138,6 +223,10 @@ export default function CamerasPage() {
                   ) : (
                     <WifiOff size={16} style={{ color: 'var(--text-secondary)', opacity: 0.5 }} />
                   )}
+                </div>
+                {/* Здоровье: загрузка и память с камеры, если она под Majestic */}
+                <div style={{ position: 'absolute', bottom: 8, left: 8 }}>
+                  <HealthBadge health={healthByCamera.get(cam.id)} />
                 </div>
               </div>
 
@@ -151,6 +240,16 @@ export default function CamerasPage() {
                 {cam.wg_ip && <div>WireGuard IP: {cam.wg_ip}</div>}
                 {cam.mac && <div style={{ fontSize: 11, fontFamily: 'monospace' }}>MAC: {cam.mac}</div>}
                 {cam.firmware && <div style={{ fontSize: 11 }}>FW: {cam.firmware}</div>}
+                {/* Поясняем проблемы словами: по одному значению load непонятно,
+                    что именно случилось с камерой. */}
+                {healthByCamera.get(cam.id)?.issues?.length ? (
+                  <div style={{ fontSize: 11, color: HEALTH_STYLE[healthByCamera.get(cam.id)!.level].color }}>
+                    {healthByCamera.get(cam.id)!.issues!.join(', ')}
+                  </div>
+                ) : null}
+                {healthByCamera.get(cam.id)?.error && (
+                  <div style={{ fontSize: 11, opacity: 0.7 }}>{healthByCamera.get(cam.id)!.error}</div>
+                )}
                 {cam.main_stream && <div style={{ fontSize: 11, wordBreak: 'break-all', opacity: 0.7 }}>Main: {cam.main_stream.slice(0, 40)}...</div>}
                 {cam.sub_stream && <div style={{ fontSize: 11, wordBreak: 'break-all', opacity: 0.7 }}>Sub: {cam.sub_stream.slice(0, 40)}...</div>}
                 {!cam.main_stream && !cam.sub_stream && cam.rtsp_url && <div style={{ fontSize: 11, wordBreak: 'break-all' }}>RTSP: {cam.rtsp_url.slice(0, 35)}...</div>}
@@ -286,98 +385,109 @@ export default function CamerasPage() {
   )
 }
 /**
- * CameraThumb — превью камеры в виде живого субпотока (HLS).
- * Субпоток лёгкий (обычно 640x360), поэтому его можно держать
- * сразу на нескольких карточках без заметной нагрузки.
+ * CameraThumb — превью камеры в виде периодически обновляемого кадра.
  *
- * Если поток не поднялся за отведённое время, показываем статичный кадр —
- * так карточка не остаётся пустой, даже когда камера отдаёт поток медленно.
+ * Раньше здесь играл субпоток по HLS. Для сетки из 19 камер это дорого:
+ * на каждую карточку поднимается RTSP-сессия, тянется видео и держится
+ * соединение — и на сервере, и на самих камерах, которые и без того
+ * перегружены (load до 14 на части устройств).
+ *
+ * Кадр через API стоит одного HTTP-запроса и не оставляет открытых сессий.
+ * Обновление раз в несколько секунд достаточно, чтобы понять, работает ли
+ * камера и что попадает в объектив.
+ *
+ * Важно: пока вкладка не видна, кадры не запрашиваются — иначе открытый
+ * в фоне список камер продолжает нагружать камеры впустую.
  */
-function CameraThumb({ id, hlsUrl }: { id: string; hlsUrl: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [failed, setFailed] = useState(false)
+function CameraThumb({ id, name }: { id: string; name: string }) {
+  // Адрес текущего кадра. Меняется только по таймеру: если подменять
+  // адрес, пока предыдущий кадр ещё грузится, браузер отменяет запрос
+  // (net::ERR_ABORTED), и плитка остаётся пустой.
+  const [src, setSrc] = useState('')
+  // Загрузка идёт: следующий кадр запрашиваем только после того, как
+  // текущий пришёл или отвалился. Без этого запросы к одной камере
+  // наслаиваются друг на друга, и она отклоняет их все.
+  const [busy, setBusy] = useState(false)
+  // Признак занятости в ref: таймер должен видеть актуальное значение,
+  // но не перезапускаться при каждом изменении состояния.
+  const busyRef = useRef(false)
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || failed) return
-
+  const buildSrc = () => {
     const token = localStorage.getItem('token')
-    if (!token) {
-      setFailed(true)
-      return
+    const params = new URLSearchParams({ w: String(THUMB_WIDTH), t: String(Date.now()) })
+    if (token) params.set('jwt', token)
+    return `/api/v1/cameras/${id}/preview?${params.toString()}`
+  }
+
+  // Первый кадр: ждём очередь, чтобы не заваливать камеры одновременными
+  // запросами (см. PREVIEW_CONCURRENCY).
+  useEffect(() => {
+    let cancelled = false
+
+    const load = async () => {
+      await acquirePreviewSlot()
+      if (cancelled) {
+        releasePreviewSlot()
+        return
+      }
+      busyRef.current = true
+      setBusy(true)
+      setSrc(buildSrc())
     }
+    load()
 
-    const u = new URL(hlsUrl, window.location.origin)
-    u.searchParams.set('token', token)
-    const src = u.pathname + u.search
+    return () => { cancelled = true }
+  }, [id])
 
-    let hls: Hls | null = null
-    let timer: number | undefined
+  // Обновление кадра по таймеру. Эффект зависит только от id: если
+  // завязать его на src, каждое обновление адреса сбрасывало бы таймер
+  // и порождало новые запросы поверх идущих.
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      // В фоновой вкладке кадры не нужны — не нагружаем камеры зря.
+      if (document.visibilityState !== 'visible') return
+      // Предыдущий кадр ещё не пришёл — ждём его, не создавая второй запрос.
+      if (busyRef.current) return
 
-    if (Hls.isSupported()) {
-      hls = new Hls({
-        // Превью в списке: минимизируем трафик и нагрузку на камеры.
-        enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 10,
-        maxBufferLength: 6,
-        maxMaxBufferLength: 12,
-        // Камера может отдавать поток с задержкой — не сдаёмся сразу.
-        manifestLoadingMaxRetry: 3,
-        manifestLoadingRetryDelay: 2000,
-      })
-      hls.loadSource(src)
-      hls.attachMedia(video)
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => {})
-      })
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (data.fatal) setFailed(true)
-      })
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = src
-    } else {
-      setFailed(true)
-    }
+      await acquirePreviewSlot()
+      busyRef.current = true
+      setBusy(true)
+      setSrc(buildSrc())
+    }, THUMB_REFRESH_MS)
 
-    // Страховка: если за 12с кадр так и не пошёл — переключаемся на снапшот.
-    timer = window.setTimeout(() => {
-      if (!video.videoWidth) setFailed(true)
-    }, 12000)
+    return () => window.clearInterval(timer)
+  }, [id])
 
-    return () => {
-      if (timer) window.clearTimeout(timer)
-      hls?.destroy()
-    }
-  }, [hlsUrl, failed])
+  // Кадр завершился (успешно или с ошибкой) — освобождаем слот очереди.
+  // Это ключевой момент: слот держится всё время загрузки, поэтому
+  // одновременно к камерам идёт не больше PREVIEW_CONCURRENCY запросов.
+  const finish = () => {
+    if (!busyRef.current) return
+    busyRef.current = false
+    setBusy(false)
+    releasePreviewSlot()
+  }
 
-  if (failed) return <SnapshotImage id={id} name="" />
-
-  return (
-    <video
-      ref={videoRef}
-      muted
-      playsInline
-      autoPlay
-      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8, background: '#000' }}
-    />
-  )
-}
-
-/** SnapshotImage — статичный кадр с камеры (обновляется при монтировании). */
-function SnapshotImage({ id, name }: { id: string; name: string }) {
-  const [failed, setFailed] = useState(false)
-  if (failed) return null
-
-  const token = localStorage.getItem('token')
-  const src = `/api/v1/cameras/${id}/snapshot${token ? `?jwt=${encodeURIComponent(token)}` : ''}`
+  if (!src) return null
 
   return (
     <img
       src={src}
       alt={name}
-      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8 }}
-      onError={() => setFailed(true)}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8, background: '#000' }}
+      onLoad={finish}
+      // Кадр может не прийти из-за занятости камеры — это не повод
+      // показывать значок ошибки: следующий запрос, скорее всего, пройдёт.
+      onError={finish}
     />
   )
 }
+
+// THUMB_REFRESH_MS — период обновления кадра в списке камер. Камеры
+// формируют JPEG с частотой около 5 кадров в секунду, но часть из них
+// отдаёт кадр только через видеопоток, и на это уходит несколько секунд.
+// Десять секунд дают свежую картинку и не заставляют камеры работать
+// на пределе — поток в списке обновлять чаще смысла нет.
+const THUMB_REFRESH_MS = 10000
+// THUMB_WIDTH — ширина кадра для карточки в сетке.
+const THUMB_WIDTH = 480

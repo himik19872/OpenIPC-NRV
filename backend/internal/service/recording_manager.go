@@ -43,7 +43,7 @@ type RecordingManager struct {
 	// onSaved вызывается после сохранения клипа — бэкенд пишет запись в БД.
 	onSaved func(clip SavedClip)
 
-	mu       sync.Mutex
+	mu sync.Mutex
 	// Камеры, для которых уже запущена непрерывная сегментная запись
 	writing map[string]bool
 	// Последнее событие по камере — чтобы не собирать клип на каждую детекцию
@@ -166,20 +166,48 @@ func (m *RecordingManager) stopOrphans(ctx context.Context, want map[string]bool
 func (m *RecordingManager) HandleEvent(ctx context.Context, cameraID uuid.UUID,
 	eventTime time.Time, triggerType domain.TriggerType, triggerDetail string) {
 
+	m.handleEvent(ctx, cameraID, eventTime, triggerType, triggerDetail, false)
+}
+
+// HandleEventPriority собирает клип по событию, которое важнее фоновой
+// детекции, и не подавляется её кулдауном.
+//
+// Проход по карте или взлом двери — единичные события, которые нельзя
+// потерять из-за того, что за секунду до этого камера записала проехавшую
+// машину. Для них кулдаун не применяется: дубли здесь исключены самой
+// природой события, а цена пропуска слишком высока.
+func (m *RecordingManager) HandleEventPriority(ctx context.Context, cameraID uuid.UUID,
+	eventTime time.Time, triggerType domain.TriggerType, triggerDetail string) {
+
+	m.handleEvent(ctx, cameraID, eventTime, triggerType, triggerDetail, true)
+}
+
+func (m *RecordingManager) handleEvent(ctx context.Context, cameraID uuid.UUID,
+	eventTime time.Time, triggerType domain.TriggerType, triggerDetail string,
+	bypassCooldown bool) {
+
 	cfg, err := m.settingsFor(ctx, cameraID)
 	if err != nil || cfg == nil || cfg.RecordMode != "event" {
 		return
 	}
 
 	key := cameraID.String()
-	m.mu.Lock()
-	// Одно событие на паузу cooldown — иначе клипы будут дублироваться
-	if last, ok := m.lastEvent[key]; ok && time.Since(last) < time.Duration(cfg.CooldownSec)*time.Second {
+	if !bypassCooldown {
+		m.mu.Lock()
+		// Одно событие на паузу cooldown — иначе клипы будут дублироваться
+		if last, ok := m.lastEvent[key]; ok && time.Since(last) < time.Duration(cfg.CooldownSec)*time.Second {
+			m.mu.Unlock()
+			return
+		}
+		m.lastEvent[key] = time.Now()
 		m.mu.Unlock()
-		return
+	} else {
+		// Отметку времени всё равно обновляем: следующая детекция объекта
+		// должна знать, что запись только что была.
+		m.mu.Lock()
+		m.lastEvent[key] = time.Now()
+		m.mu.Unlock()
 	}
-	m.lastEvent[key] = time.Now()
-	m.mu.Unlock()
 
 	// Для событий нужна активная сегментная запись: без неё нет пребуфера.
 	if !m.recorder.IsWriting(cameraID) {
@@ -195,8 +223,16 @@ func (m *RecordingManager) HandleEvent(ctx context.Context, cameraID uuid.UUID,
 		}
 	}
 
-	go m.collectAndSave(ctx, cameraID, eventTime, cfg.PrebufferSec, cfg.PostbufferSec,
-		triggerType, triggerDetail)
+	// Контекст берём собственный, а не родительский: сборка клипа продолжается
+	// после возврата HandleEvent (ждёт постбуфер) и сохраняет файл в MinIO.
+	// С родительским контекстом загрузка обрывалась на середине с
+	// «context canceled», и клип терялся.
+	saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	go func() {
+		defer cancel()
+		m.collectAndSave(saveCtx, cameraID, eventTime, cfg.PrebufferSec, cfg.PostbufferSec,
+			triggerType, triggerDetail)
+	}()
 }
 
 // collectAndSave собирает клип и сохраняет его в хранилище.
@@ -252,6 +288,14 @@ func removeFile(path string) {
 }
 
 // settingsFor возвращает настройки одной камеры.
+// SettingsFor возвращает настройки детекции камеры.
+//
+// Нужно снаружи: съёмка по событию доступа использует пребуфер, чтобы
+// понять, сколько ждать наполнения буфера сегментов перед сборкой клипа.
+func (m *RecordingManager) SettingsFor(ctx context.Context, cameraID uuid.UUID) (*domain.DetectionSettings, error) {
+	return m.settingsFor(ctx, cameraID)
+}
+
 func (m *RecordingManager) settingsFor(ctx context.Context, cameraID uuid.UUID) (*domain.DetectionSettings, error) {
 	configs, err := m.settings.ListEnabled(ctx)
 	if err != nil {

@@ -52,3 +52,22 @@ __pycache__/
 # --- Локальные модели ---
 # Модель YAMNet скачивается при сборке образа ai-detector.
 ai-detector/models/
+
+# --- Прошивка СКУД-контроллера (ESP32-P4) ---
+# Артефакты сборки ESP-IDF: каталог build занимает сотни мегабайт
+# и полностью пересоздаётся командой idf.py build.
+skud-esp34-p4/build/
+# Компоненты, скачанные менеджером зависимостей: восстанавливаются
+# по dependencies.lock и idf_component.yml.
+skud-esp34-p4/managed_components/
+skud-esp34-p4/sdkconfig.old
+# Документация и материалы производителя: в репозитории не нужны.
+skud-esp34-p4/*.pdf
+skud-esp34-p4/*.jpg
+skud-esp34-p4/*-DEV-KIT*.html
+skud-esp34-p4/*_files/
+skud-esp34-p4/*.bin
+
+# Дампы схем и парсера документации
+schema_dump.txt
+schematic.txt

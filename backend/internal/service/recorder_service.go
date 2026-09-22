@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -380,12 +381,67 @@ func (r *RecorderService) segmentsInRange(dir string, from, to time.Time) ([]str
 		}
 		// Сегмент покрывает [ts, ts+SegmentSec]: берём пересекающиеся с интервалом
 		segEnd := ts.Add(time.Duration(r.SegmentSec) * time.Second)
-		if segEnd.After(from) && ts.Before(to) {
-			picked = append(picked, filepath.Join(dir, name))
+		if !segEnd.After(from) || !ts.Before(to) {
+			continue
 		}
+
+		// Последний сегмент ещё дописывается: ffmpeg создаёт файл сразу,
+		// но индекс (moov atom) появляется только в конце. Такой файл
+		// невалиден, и склейка падает с «exit status 183».
+		// Пропускаем сегменты, которые ещё могут быть не дописаны.
+		if segEnd.After(time.Now().Add(-2 * time.Second)) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		// Дополнительная проверка на случай, если запись встала: файл мог
+		// остаться без индекса, и тогда он сломает склейку.
+		if !hasMoovAtom(full) {
+			continue
+		}
+
+		picked = append(picked, full)
 	}
 	// os.ReadDir сортирует по имени, а имя содержит время — порядок уже верный
 	return picked, nil
+}
+
+// hasMoovAtom сообщает, содержит ли MP4 индекс (moov atom).
+//
+// Индекс пишется в конец файла при корректном завершении записи сегмента,
+// поэтому его отсутствие означает незавершённый файл.
+func hasMoovAtom(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	// Индекс лежит в конце файла, но у больших файлов он может быть и
+	// в начале (перемещён при faststart) — поэтому читаем оба края.
+	const probe = 64 * 1024
+
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	size := st.Size()
+	if size == 0 {
+		return false
+	}
+
+	buf := make([]byte, probe)
+	// Начало файла
+	n, _ := f.ReadAt(buf, 0)
+	if bytes.Contains(buf[:n], []byte("moov")) {
+		return true
+	}
+	// Конец файла
+	if size > probe {
+		off := size - probe
+		n, _ = f.ReadAt(buf, off)
+		return bytes.Contains(buf[:n], []byte("moov"))
+	}
+	return false
 }
 
 // concatSegments склеивает сегменты в один файл.
@@ -394,6 +450,7 @@ func (r *RecorderService) segmentsInRange(dir string, from, to time.Time) ([]str
 // Поэтому клип приводится к этому виду, если источник другой:
 //   - HEVC (H.265) — не воспроизводится из-за лицензионных ограничений;
 //   - yuvj420p и прочие full-range форматы — многие браузеры отклоняют.
+//
 // Совместимый поток просто склеивается без перекодирования (экономия CPU).
 func concatSegments(segments []string, out string) error {
 	listPath := out + ".txt"

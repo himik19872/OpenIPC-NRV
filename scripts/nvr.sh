@@ -116,6 +116,10 @@ cmd_status() {
   printf "  MinIO Console     http://%s:9001\n" "$ip"
   printf "  MediaMTX API      http://%s:9997\n" "$ip"
   echo ""
+  printf "${BOLD}Потоки для внешних систем:${NC}\n"
+  printf "  rtsp://ЛОГИН:ПАРОЛЬ@%s:9784/cameras/{НОМЕР-1}/streaming/main\n" "$ip"
+  printf "  Список каналов и ссылки — на странице «Внешний доступ»\n"
+  echo ""
   printf "  Логин по умолчанию: admin / admin123 ${YELLOW}(смените после первого входа!)${NC}\n"
   echo ""
 }

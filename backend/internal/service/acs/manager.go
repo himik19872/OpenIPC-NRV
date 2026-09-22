@@ -3,6 +3,7 @@ package acs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/nvr/backend/internal/domain"
 	"github.com/nvr/backend/internal/repository/postgres"
@@ -29,6 +30,49 @@ type DoorStatus struct {
 	Alarm  bool `json:"alarm"`
 }
 
+// CardManager реализуют адаптеры, умеющие управлять базой карт.
+//
+// Вынесено в отдельный интерфейс, а не в Adapter: вендорские контроллеры
+// хранят карты у себя и отдают их по своим протоколам, а наш SKUD работает
+// как ведомое устройство центрального сервера. Требовать эту возможность
+// от всех адаптеров нельзя, поэтому наличие проверяется через приведение
+// типа, а не через обязательный метод.
+type CardManager interface {
+	ListCards(ctx context.Context) ([]domain.ACSCard, error)
+	AddCard(ctx context.Context, card domain.ACSCard) error
+	UpdateCard(ctx context.Context, card domain.ACSCard) error
+	RemoveCard(ctx context.Context, facility, card int) error
+	ClearCards(ctx context.Context) error
+	ImportCards(ctx context.Context, cards []domain.ACSCard) (int, error)
+	SetCardMode(ctx context.Context, name string) error
+	CancelCardMode(ctx context.Context) error
+	GetCardMode(ctx context.Context) (bool, error)
+}
+
+// CardsFor возвращает интерфейс управления картами, если адаптер его
+// поддерживает.
+func CardsFor(adapter Adapter) (CardManager, bool) {
+	cm, ok := adapter.(CardManager)
+	return cm, ok
+}
+
+// FirmwareManager реализуют адаптеры, умеющие обновлять прошивку по OTA.
+//
+// Как и управление картами, это необязательная возможность: у вендорских
+// контроллеров обновление идёт своими средствами и через свои протоколы,
+// поэтому требовать её от всех адаптеров нельзя.
+type FirmwareManager interface {
+	GetFirmwareInfo(ctx context.Context) (*FirmwareInfo, error)
+	UploadFirmware(ctx context.Context, image []byte) error
+	VerifyFirmwareVersion(ctx context.Context, timeout time.Duration) (string, error)
+}
+
+// FirmwareFor возвращает интерфейс OTA, если адаптер его поддерживает.
+func FirmwareFor(adapter Adapter) (FirmwareManager, bool) {
+	fm, ok := adapter.(FirmwareManager)
+	return fm, ok
+}
+
 // Manager управляет адаптерами СКУД
 type Manager struct {
 	repo     *postgres.ACSRepo
@@ -47,6 +91,9 @@ func NewManager(repo *postgres.ACSRepo) *Manager {
 	m.Register("hikvision", NewHikvisionAdapter)
 	m.Register("dahua", NewDahuaAdapter)
 	m.Register("promwad", NewPromwadAdapter)
+	// Контроллер собственной разработки на ESP32-P4: простой REST API
+	// с Basic Auth вместо вендорских протоколов.
+	m.Register("skud", NewSkudAdapter)
 
 	return m
 }

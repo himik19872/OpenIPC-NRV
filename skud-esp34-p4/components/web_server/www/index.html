@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>СКУД — контроллер</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --accent:#38bdf8; --text:#e2e8f0; }
+  * { box-sizing:border-box; }
+  body { font-family: system-ui, sans-serif; background:var(--bg); color:var(--text);
+         margin:0; padding:16px; }
+  h1 { font-size:1.3rem; }
+  .tabs { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+  .tab { background:var(--card); border:1px solid #334155; color:var(--text);
+         padding:8px 16px; border-radius:8px 8px 0 0; cursor:pointer; font-weight:600; }
+  .tab.active { background:var(--accent); color:#0b1220; }
+  .card { background:var(--card); border-radius:12px; padding:20px; margin-bottom:16px;
+          max-width:720px; }
+  .row { display:flex; align-items:center; justify-content:space-between; margin:10px 0; gap:10px; }
+  label { font-weight:600; }
+  input, select { background:#0b1220; color:var(--text); border:1px solid #334155;
+                  border-radius:8px; padding:8px 10px; width:180px; font-size:1rem; }
+  button { background:var(--accent); color:#0b1220; font-weight:700; border:0;
+           border-radius:8px; padding:10px 18px; cursor:pointer; font-size:1rem; }
+  button.secondary { background:#334155; color:var(--text); }
+  #status { margin-top:12px; font-size:0.9rem; color:#94a3b8; min-height:1.2em; }
+  .ok { color:#4ade80; } .err { color:#f87171; }
+  h2 { font-size:1.05rem; margin-top:0; }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #334155; }
+  th { color:#94a3b8; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+</style>
+</head>
+<body>
+<h1>🔐 СКУД контроллер</h1>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('dash',this); loadDash();">Главная</div>
+  <div class="tab" onclick="showTab('pins',this)">Пины</div>
+  <div class="tab" onclick="showTab('door',this)">Дверь</div>
+  <div class="tab" onclick="showTab('net',this)">Сеть</div>
+  <div class="tab" onclick="showTab('sched',this); loadSched();">Расписание</div>
+  <div class="tab" onclick="showTab('cards',this); loadCards();">Карты</div>
+  <div class="tab" onclick="showTab('sys',this)">Система</div>
+  <div class="tab" onclick="showTab('log',this); loadLog();">Журнал</div>
+</div>
+
+<!-- DASHBOARD PANEL -->
+<div class="panel active" id="panel-dash">
+  <div class="card">
+    <h2 id="dash_title">Контроллер</h2>
+    <div class="row"><label>Время</label><span id="dash_time" style="font-weight:600;">—</span></div>
+    <div class="row"><label>Время работы</label><span id="dash_uptime">—</span></div>
+    <div class="row"><label>Свободно памяти</label><span id="dash_mem">—</span></div>
+    <div class="row"><label>Карт в базе</label><span id="dash_cards">—</span></div>
+    <div class="row"><label>Событий в журнале</label><span id="dash_events">—</span></div>
+    <div class="row"><label>Место установки</label><span id="dash_loc" style="font-weight:600;">—</span></div>
+  </div>
+  <div class="card">
+    <h2>Последние проходы</h2>
+    <table id="dash_access_table">
+      <thead><tr><th>Время</th><th>Карта</th><th>ФИО</th><th>Результат</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- PINS PANEL -->
+<div class="panel" id="panel-pins">
+  <div class="card">
+    <h2>Подключение</h2>
+    <div class="row"><label>Реле замка (GPIO)</label><input id="lock_gpio" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Кнопка выхода (GPIO)</label><input id="rte_gpio" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Датчик двери (GPIO)</label><input id="sensor_gpio" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Зуммер (GPIO)</label><input id="buzzer_gpio" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Wiegand D0 вход (GPIO)</label><input id="wiegand_d0" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Wiegand D1 вход (GPIO)</label><input id="wiegand_d1" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Wiegand D0 выход (GPIO)</label><input id="wiegand2_d0" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Wiegand D1 выход (GPIO)</label><input id="wiegand2_d1" type="number" min="-1" max="54"></div>
+    <div class="row"><label>Импульс замка (мс)</label><input id="lock_pulse_ms" type="number" min="100" max="60000"></div>
+    <p style="font-size:0.8rem; color:#94a3b8;">-1 = отключить. Занято: 31/52/51 (Ethernet), 39-48 (SD). Зуммер — пассивный (на PWM-совместимый пин).</p>
+    <button onclick="savePins()">💾 Сохранить</button>
+    <button class="secondary" onclick="openDoor()">🚪 Открыть дверь</button>
+    <div id="status"></div>
+  </div>
+</div>
+
+<!-- DOOR PANEL -->
+<div class="panel" id="panel-door">
+  <div class="card">
+    <h2>Настройки двери</h2>
+    <div class="row"><label>Тип двери</label>
+      <select id="door_type">
+        <option value="0">1 считыватель + кнопка</option>
+        <option value="1">2 считывателя (вход/выход)</option>
+      </select></div>
+    <div class="row"><label>Antipassback</label><input id="antipassback" type="checkbox" style="width:20px;"></div>
+    <button onclick="saveSys()">💾 Сохранить дверь</button>
+    <div id="status_door" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+</div>
+
+<!-- NETWORK PANEL -->
+<div class="panel" id="panel-net">
+  <div class="card">
+    <h2>Сеть</h2>
+    <div class="row"><label>Режим</label>
+      <select id="net_mode">
+        <option value="0">DHCP</option>
+        <option value="1">Статический</option>
+      </select></div>
+    <div class="row"><label>IP-адрес</label><input id="net_ip" placeholder="192.168.1.100"></div>
+    <div class="row"><label>Маска</label><input id="net_mask" placeholder="255.255.255.0"></div>
+    <div class="row"><label>Шлюз</label><input id="net_gw" placeholder="192.168.1.1"></div>
+    <button onclick="saveSys()">💾 Сохранить сеть</button>
+    <p style="font-size:0.8rem; color:#94a3b8;">Статический IP применится после перезагрузки.</p>
+  </div>
+  <div class="card">
+    <h2>Сервер (режим работы)</h2>
+    <div class="row"><label>Режим работы</label>
+      <select id="op_mode">
+        <option value="0">Автономный</option>
+        <option value="1">Сетевой</option>
+      </select></div>
+    <div class="row"><label>Адрес сервера</label><input id="server_host" placeholder="192.168.1.10"></div>
+    <div class="row"><label>Порт</label><input id="server_port" type="number" min="1" max="65535"></div>
+    <div class="row"><label>Путь API</label><input id="server_path" placeholder="/api"></div>
+    <button onclick="saveSys()">💾 Сохранить сервер</button>
+  </div>
+</div>
+
+<!-- SCHEDULE PANEL -->
+<div class="panel" id="panel-sched">
+  <div class="card">
+    <h2>Недельное расписание</h2>
+    <p style="font-size:0.8rem; color:#94a3b8;">Дни недели (0=Вс .. 6=Сб). Время в минутах от полуночи. «Вкл» оставить пустым = без ограничения для дня.</p>
+    <table id="sched_table">
+      <thead><tr><th>День</th><th>Вкл</th><th>С (мин)</th><th>До (мин)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Плавающее расписание (даты)</h2>
+    <div class="row"><label>Включить</label><input id="floating_enabled" type="checkbox" style="width:20px;"></div>
+    <div class="row"><label>Начало (unix ts)</label><input id="floating_start" type="number"></div>
+    <div class="row"><label>Конец (unix ts)</label><input id="floating_end" type="number"></div>
+    <p style="font-size:0.8rem; color:#94a3b8;">Unix timestamp. Пример: 2026-09-20 00:00 UTC = 1780000000.</p>
+    <button onclick="saveSched()">💾 Сохранить расписание</button>
+    <div id="status_sched" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+</div>
+
+<!-- CARDS PANEL -->
+<div class="panel" id="panel-cards">
+  <div class="card">
+    <h2>Карты доступа</h2>
+    <div class="row"><label>Facility</label><input id="c_facility" type="number" min="0" max="255"></div>
+    <div class="row"><label>Номер карты</label><input id="c_card" type="number" min="0" max="65535"></div>
+    <div class="row"><label>ФИО</label><input id="c_name" placeholder="Иванов Иван"></div>
+    <div class="row"><label>Тип доступа</label>
+      <select id="c_access"><option value="0">Постоянный</option><option value="1">По расписанию</option></select></div>
+    <div class="row"><label>Активна</label><input id="c_active" type="checkbox" checked style="width:20px;"></div>
+    <button onclick="addCard()">➕ Добавить карту</button>
+    <button class="secondary" onclick="armLearn()">📡 Обучить (со считывателя)</button>
+    <button class="secondary" onclick="exportCards()">⬇ Экспорт JSON</button>
+    <button class="secondary" onclick="document.getElementById('import_file').click()">⬆ Импорт JSON</button>
+    <input type="file" id="import_file" accept=".json" style="display:none" onchange="importCards(this)">
+    <button class="secondary" onclick="clearCards()">🗑 Очистить все</button>
+    <div id="status_cards" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+  <div class="card">
+    <h2>Список карт</h2>
+    <table id="cards_table">
+      <thead><tr><th>Ключ</th><th>ФИО</th><th>Доступ</th><th>Статус</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- SYSTEM PANEL -->
+<div class="panel" id="panel-sys">
+  <div class="card">
+    <h2>Доступ</h2>
+    <div class="row"><label>Логин</label><input id="sys_login"></div>
+    <div class="row"><label>Пароль</label><input id="sys_password" type="password"></div>
+    <button onclick="saveSys()">💾 Сохранить доступ</button>
+    <div id="status_sys" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+  <div class="card">
+    <h2>Syslog (UDP)</h2>
+    <div class="row"><label>Включить</label><input id="syslog_enabled" type="checkbox" style="width:20px;"></div>
+    <div class="row"><label>IP-адрес сервера</label><input id="syslog_host" placeholder="192.168.1.10"></div>
+    <div class="row"><label>Порт</label><input id="syslog_port" type="number" min="1" max="65535"></div>
+    <button onclick="saveSys()">💾 Сохранить syslog</button>
+  </div>
+  <div class="card">
+    <h2>Время и идентификация</h2>
+    <div class="row"><label>Имя контроллера</label><input id="device_name"></div>
+    <div class="row"><label>Место установки</label><input id="device_location"></div>
+    <div class="row"><label>NTP сервер</label><input id="ntp_server" placeholder="pool.ntp.org"></div>
+    <div class="row"><label>Период синхр. (сек)</label><input id="ntp_interval_sec" type="number" min="0" max="86400"></div>
+    <div class="row"><label>Часовой пояс (мин от UTC)</label><input id="timezone_min" type="number" min="-720" max="840">
+      <span style="font-size:0.75rem;color:#94a3b8;">+180 = МСК, 0 = UTC</span></div>
+    <button onclick="saveSys()">💾 Сохранить</button>
+    <button class="secondary" onclick="syncTime()">🕐 Синхронизировать сейчас</button>
+    <div id="status_time" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+  <div class="card">
+    <h2>Обновление прошивки (OTA)</h2>
+    <div class="row"><label>Файл .bin</label>
+      <input type="file" id="ota_file" accept=".bin" style="width:220px;"></div>
+    <button class="secondary" onclick="uploadOta()">⬆ Обновить прошивку</button>
+    <div id="status_ota" style="margin-top:10px;font-size:0.9rem;color:#94a3b8;"></div>
+  </div>
+</div>
+
+<!-- LOG PANEL -->
+<div class="panel" id="panel-log">
+  <div class="card">
+    <h2>Журнал событий</h2>
+    <button class="secondary" onclick="loadLog()">🔄 Обновить</button>
+    <button class="secondary" onclick="clearLog()">🗑 Очистить</button>
+    <table id="log_table">
+      <thead><tr><th>Время</th><th>Событие</th><th>Карта</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let AUTH = null;
+
+function authHeaders() {
+  if (!AUTH) AUTH = btoa('admin:admin');
+  return { 'Authorization': 'Basic ' + AUTH, 'Content-Type':'application/json' };
+}
+
+function showTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+async function api(url, method, body) {
+  const opts = { method, headers: authHeaders() };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  if (r.status === 401 && !body) {
+    const creds = prompt('Введите логин и пароль через ":" (например admin:admin)');
+    if (creds) { AUTH = btoa(creds); return api(url, method, body); }
+    throw new Error('Нет авторизации');
+  }
+  return r.json();
+}
+
+async function loadPins() {
+  try {
+    const c = await api('/api/config', 'GET');
+    document.getElementById('lock_gpio').value = c.lock_gpio;
+    document.getElementById('rte_gpio').value = c.rte_gpio;
+    document.getElementById('sensor_gpio').value = c.sensor_gpio;
+    document.getElementById('buzzer_gpio').value = c.buzzer_gpio;
+    document.getElementById('wiegand_d0').value = c.wiegand_d0;
+    document.getElementById('wiegand_d1').value = c.wiegand_d1;
+    document.getElementById('wiegand2_d0').value = c.wiegand2_d0;
+    document.getElementById('wiegand2_d1').value = c.wiegand2_d1;
+    document.getElementById('lock_pulse_ms').value = c.lock_pulse_ms;
+  } catch(e){ setStatus('Ошибка загрузки: '+e, false); }
+}
+
+async function loadSys() {
+  try {
+    const c = await api('/api/sysconfig', 'GET');
+    document.getElementById('sys_login').value = c.login;
+    document.getElementById('sys_password').value = c.password;
+    document.getElementById('syslog_enabled').checked = c.syslog_enabled;
+    document.getElementById('syslog_host').value = c.syslog_host;
+    document.getElementById('syslog_port').value = c.syslog_port;
+
+    document.getElementById('net_mode').value = c.net_mode;
+    document.getElementById('net_ip').value = c.ip;
+    document.getElementById('net_mask').value = c.mask;
+    document.getElementById('net_gw').value = c.gw;
+
+    document.getElementById('op_mode').value = c.op_mode;
+    document.getElementById('server_host').value = c.server_host;
+    document.getElementById('server_port').value = c.server_port;
+    document.getElementById('server_path').value = c.server_path;
+
+    document.getElementById('door_type').value = c.door_type;
+    document.getElementById('antipassback').checked = c.antipassback;
+
+    document.getElementById('ntp_server').value = c.ntp_server;
+    document.getElementById('ntp_interval_sec').value = c.ntp_interval_sec;
+    document.getElementById('timezone_min').value = c.timezone_min;
+    document.getElementById('device_name').value = c.device_name;
+    document.getElementById('device_location').value = c.device_location;
+
+    if (c.login) AUTH = btoa(c.login + ':' + c.password);
+  } catch(e){}
+}
+
+function v(id){ return parseInt(document.getElementById(id).value, 10); }
+
+async function savePins() {
+  const body = {
+    lock_gpio:v('lock_gpio'), rte_gpio:v('rte_gpio'), sensor_gpio:v('sensor_gpio'),
+    buzzer_gpio:v('buzzer_gpio'),
+    wiegand_d0:v('wiegand_d0'), wiegand_d1:v('wiegand_d1'),
+    wiegand2_d0:v('wiegand2_d0'), wiegand2_d1:v('wiegand2_d1'),
+    lock_pulse_ms:v('lock_pulse_ms')
+  };
+  try {
+    const j = await api('/api/config','POST',body);
+    setStatus(j.ok?'Сохранено. Пины применены.':'Ошибка', j.ok);
+  } catch(e){ setStatus('Ошибка: '+e, false); }
+}
+
+async function saveSys() {
+  const body = {
+    login: document.getElementById('sys_login').value,
+    password: document.getElementById('sys_password').value,
+    syslog_enabled: document.getElementById('syslog_enabled').checked,
+    syslog_host: document.getElementById('syslog_host').value,
+    syslog_port: parseInt(document.getElementById('syslog_port').value,10) || 514,
+
+    net_mode: parseInt(document.getElementById('net_mode').value,10) || 0,
+    ip: document.getElementById('net_ip').value,
+    mask: document.getElementById('net_mask').value,
+    gw: document.getElementById('net_gw').value,
+
+    op_mode: parseInt(document.getElementById('op_mode').value,10) || 0,
+    server_host: document.getElementById('server_host').value,
+    server_port: parseInt(document.getElementById('server_port').value,10) || 80,
+    server_path: document.getElementById('server_path').value,
+
+    door_type: parseInt(document.getElementById('door_type').value,10) || 0,
+    antipassback: document.getElementById('antipassback').checked,
+
+    ntp_server: document.getElementById('ntp_server').value,
+    ntp_interval_sec: parseInt(document.getElementById('ntp_interval_sec').value,10) || 3600,
+    timezone_min: parseInt(document.getElementById('timezone_min').value,10) || 0,
+    device_name: document.getElementById('device_name').value,
+    device_location: document.getElementById('device_location').value
+  };
+  try {
+    const j = await api('/api/sysconfig','POST',body);
+    const el = document.getElementById('status_sys') || document.getElementById('status_door');
+    if (el) { el.textContent = j.ok?'Сохранено':'Ошибка'; el.className = j.ok?'ok':'err'; }
+    if (j.ok) AUTH = btoa(body.login+':'+body.password);
+  } catch(e){ console.error(e); }
+}
+
+async function openDoor() {
+  try { await api('/api/door/open','POST'); setStatus('Команда открытия отправлена', true); }
+  catch(e){ setStatus('Ошибка: '+e, false); }
+}
+
+const EVT_NAMES = {
+  0:'Карта разрешена',1:'Карта отклонена',2:'Кнопка выхода',3:'Дверь открыта',
+  4:'Дверь закрыта',5:'Взлом двери',6:'Старт системы',7:'Ошибка входа',8:'Конфиг изменён'
+};
+
+async function loadLog() {
+  try {
+    const j = await api('/api/log','GET');
+    const tbody = document.querySelector('#log_table tbody');
+    tbody.innerHTML = '';
+    (j.events||[]).forEach(e => {
+      const tr = document.createElement('tr');
+      const d = new Date(e.ts*1000);
+      const time = isNaN(d) ? e.ts : d.toLocaleString();
+      const card = (e.type<=1 && e.card>0) ? ('f'+e.facility+' карта '+e.card) : '';
+      tr.innerHTML = '<td>'+time+'</td><td>'+(EVT_NAMES[e.type]||e.type)+' '+e.note+'</td><td>'+card+'</td>';
+      tbody.appendChild(tr);
+    });
+  } catch(e){ console.error(e); }
+}
+
+async function clearLog() {
+  if (!confirm('Очистить журнал?')) return;
+  await api('/api/log/clear','POST');
+  loadLog();
+}
+
+const DAY_NAMES = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+let sched_data = [];  // cached weekly array
+
+async function loadSched() {
+  try {
+    const c = await api('/api/sysconfig', 'GET');
+    sched_data = c.weekly || [];
+    document.getElementById('floating_enabled').checked = c.floating_enabled;
+    document.getElementById('floating_start').value = c.floating_start;
+    document.getElementById('floating_end').value = c.floating_end;
+    renderSchedTable();
+  } catch(e){ console.error(e); }
+}
+
+function renderSchedTable() {
+  const tb = document.querySelector('#sched_table tbody');
+  tb.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    const d = (sched_data.find(x => x.day === i)) || { day:i, enabled:0, on:480, off:1080 };
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>'+DAY_NAMES[i]+'</td>' +
+      '<td><input type="checkbox" data-day="'+i+'" class="s_en" '+(d.enabled?'checked':'')+'></td>' +
+      '<td><input type="number" data-day="'+i+'" class="s_on" value="'+d.on+'"></td>' +
+      '<td><input type="number" data-day="'+i+'" class="s_off" value="'+d.off+'"></td>';
+    tb.appendChild(tr);
+  }
+}
+
+async function saveSched() {
+  const weekly = [];
+  for (let i = 0; i < 7; i++) {
+    const en = document.querySelector('.s_en[data-day="'+i+'"]').checked ? 1 : 0;
+    const on = parseInt(document.querySelector('.s_on[data-day="'+i+'"]').value,10) || 0;
+    const off = parseInt(document.querySelector('.s_off[data-day="'+i+'"]').value,10) || 0;
+    weekly.push({ day:i, enabled:en, on:on, off:off });
+  }
+  const body = {
+    weekly: weekly,
+    floating_enabled: document.getElementById('floating_enabled').checked,
+    floating_start: parseInt(document.getElementById('floating_start').value,10) || 0,
+    floating_end: parseInt(document.getElementById('floating_end').value,10) || 0
+  };
+  try {
+    const j = await api('/api/sysconfig','POST',body);
+    const el = document.getElementById('status_sched');
+    el.textContent = j.ok?'Сохранено':'Ошибка';
+    el.className = j.ok?'ok':'err';
+  } catch(e){ const el=document.getElementById('status_sched'); el.textContent='Ошибка: '+e; el.className='err'; }
+}
+
+/* ---- Cards ---- */
+async function loadCards() {
+  try {
+    const j = await api('/api/cards','GET');
+    const tb = document.querySelector('#cards_table tbody');
+    tb.innerHTML = '';
+    (j.cards||[]).forEach(c => {
+      const tr = document.createElement('tr');
+      const key = c.facility + ':' + c.card;
+      const acc = c.access === 0 ? 'Постоянный' : 'По расписанию';
+      const st = c.active ? '✅' : '⛔';
+      tr.innerHTML =
+        '<td>'+key+'</td><td>'+(c.name||'')+'</td><td>'+acc+'</td><td>'+st+'</td>' +
+        '<td><button class="secondary" onclick="delCard('+c.facility+','+c.card+')">✖</button></td>';
+      tb.appendChild(tr);
+    });
+  } catch(e){ console.error(e); }
+}
+
+async function addCard() {
+  const body = {
+    facility: parseInt(document.getElementById('c_facility').value,10) || 0,
+    card: parseInt(document.getElementById('c_card').value,10) || 0,
+    name: document.getElementById('c_name').value,
+    access: parseInt(document.getElementById('c_access').value,10) || 0,
+    group: '',
+    active: document.getElementById('c_active').checked
+  };
+  try {
+    const j = await api('/api/cards/add','POST',body);
+    setCardStatus(j.ok?'Добавлено':'Ошибка: '+(j.error||'?'), j.ok);
+    if (j.ok) { loadCards(); document.getElementById('c_card').value=''; document.getElementById('c_name').value=''; }
+  } catch(e){ setCardStatus('Ошибка: '+e, false); }
+}
+
+async function delCard(f, c) {
+  await api('/api/cards/remove','POST',{facility:f, card:c});
+  loadCards();
+}
+
+async function clearCards() {
+  if (!confirm('Удалить ВСЕ карты?')) return;
+  await api('/api/cards/clear','POST');
+  loadCards();
+}
+
+function exportCards() {
+  fetch('/api/cards/export', { headers: authHeaders() })
+    .then(r => r.blob())
+    .then(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cards.json';
+      a.click();
+    });
+}
+
+function importCards(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async function() {
+    try {
+      const j = await api('/api/cards/import','POST', JSON.parse(reader.result));
+      setCardStatus('Импортировано: '+(j.imported||0)+' из '+(j.total||0), j.ok);
+      loadCards();
+    } catch(e){ setCardStatus('Ошибка импорта: '+e, false); }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function setCardStatus(t, ok) {
+  const el = document.getElementById('status_cards');
+  el.textContent = t;
+  el.className = ok ? 'ok' : 'err';
+}
+
+async function armLearn() {
+  const name = document.getElementById('c_name').value || '(обучение)';
+  await api('/api/cards/learn','POST',{name:name});
+  setCardStatus('Поднесите карту к считывателю… (кнопка отмены ниже)', true);
+  // poll learn status
+  setTimeout(async () => {
+    const j = await api('/api/cards/learn','GET');
+    if (!j.learn_active) { setCardStatus('Карта обучена', true); loadCards(); }
+  }, 5000);
+}
+
+function setStatus(t, ok) {
+  const s = document.getElementById('status');
+  s.textContent = t;
+  s.className = ok ? 'ok' : 'err';
+}
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600),
+        m = Math.floor((s%3600)/60);
+  return d+'д '+h+'ч '+m+'м';
+}
+
+async function syncTime() {
+  await api('/api/time/sync','POST');
+  const el = document.getElementById('status_time');
+  el.textContent = 'Запрос синхронизации отправлен';
+  el.className = 'ok';
+}
+
+async function uploadOta() {
+  const f = document.getElementById('ota_file').files[0];
+  if (!f) { alert('Выберите .bin файл'); return; }
+  if (!confirm('Обновить прошивку? После загрузки контроллер перезагрузится.')) return;
+
+  const el = document.getElementById('status_ota');
+  el.textContent = 'Загрузка прошивки...';
+  el.className = '';
+
+  try {
+    const r = await fetch('/api/ota', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: f
+    });
+    if (r.status === 200) {
+      el.textContent = 'Прошивка загружена. Перезагрузка...';
+      el.className = 'ok';
+    } else {
+      const j = await r.json();
+      el.textContent = 'Ошибка: ' + (j.error || r.status);
+      el.className = 'err';
+    }
+  } catch(e) {
+    // during reboot fetch may error, but OTA succeeded
+    el.textContent = 'Загрузка завершена (перезагрузка)';
+    el.className = 'ok';
+  }
+}
+
+async function loadDash() {
+  try {
+    const st = await api('/api/status','GET');
+    document.getElementById('dash_title').textContent = st.device_name + ' — ' + st.device_location;
+    document.getElementById('dash_time').textContent = st.time_str + (st.time_synced?' ✅':' ⚠️');
+    document.getElementById('dash_uptime').textContent = fmtUptime(st.uptime_sec);
+    document.getElementById('dash_mem').textContent = Math.round(st.free_heap/1024) + ' KB';
+    document.getElementById('dash_cards').textContent = st.card_count;
+    document.getElementById('dash_events').textContent = st.event_count;
+    document.getElementById('dash_loc').textContent = st.device_location;
+
+    // recent access history (from log)
+    const j = await api('/api/log','GET');
+    const tb = document.querySelector('#dash_access_table tbody');
+    tb.innerHTML = '';
+    // show last 10 card events
+    const cardEvents = (j.events||[]).filter(e => e.type === 0 || e.type === 1).slice(-10).reverse();
+    cardEvents.forEach(e => {
+      const tr = document.createElement('tr');
+      const d = new Date(e.ts*1000);
+      const time = isNaN(d) ? e.ts : d.toLocaleTimeString();
+      const key = e.facility + ':' + e.card;
+      const res = (e.type === 1) ? '❌ отклонена'
+        : (e.flags & 1) ? '✅ проход совершён' : '🕓 проход не совершён';
+      const name = e.note && e.note !== 'granted' ? e.note : '';
+      tr.innerHTML = '<td>'+time+'</td><td>'+key+'</td><td>'+name+'</td><td>'+res+'</td>';
+      tb.appendChild(tr);
+    });
+  } catch(e){ console.error(e); }
+}
+
+loadPins();
+loadSys();
+loadDash();
+setInterval(() => { if (document.getElementById('panel-dash').classList.contains('active')) loadDash(); }, 30000);
+</script>
+</body>
+</html>

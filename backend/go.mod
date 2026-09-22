@@ -15,6 +15,7 @@ require (
 	github.com/nats-io/nats.go v1.37.0
 	github.com/rs/zerolog v1.33.0
 	golang.org/x/crypto v0.28.0
+	golang.org/x/image v0.18.0
 	golang.org/x/net v0.28.0
 )
 

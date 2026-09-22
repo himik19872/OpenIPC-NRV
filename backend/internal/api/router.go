@@ -22,6 +22,7 @@ type RouterConfig struct {
 	CameraSvc    *service.CameraService
 	EventSvc     *service.EventService
 	ACSSvc       *service.ACSService
+	FirmwareSvc  *service.FirmwareService
 	UserRepo     *postgres.UserRepo
 	JWTSecret    string
 	WGManager    *tunnel.WireGuardManager
@@ -33,6 +34,14 @@ type RouterConfig struct {
 	RetentionSvc *service.RetentionService
 	// AudioSvc обеспечивает звук с камер (транскодирование G.711 → AAC)
 	AudioSvc *service.AudioService
+	// HealthSvc собирает показатели здоровья камер OpenIPC (Majestic)
+	HealthSvc *service.CameraHealthService
+	// SettingsSvc меняет настройки камеры через HTTP API вместо SSH
+	SettingsSvc *service.CameraSettingsService
+	// PreviewSvc отдаёт кадр с камеры для превью в интерфейсе
+	PreviewSvc *service.CameraPreviewService
+	// ExternalRTSPSvc публикует потоки для внешних систем
+	ExternalRTSPSvc *service.ExternalRTSPService
 }
 
 func NewRouter(cfg RouterConfig) *chi.Mux {
@@ -60,10 +69,15 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 	cameraH := handlers.NewCameraHandler(cfg.CameraSvc)
 	streamH := handlers.NewStreamHandler(cfg.CameraSvc, cfg.MediamtxHost, tokenAuth)
 	scannerH := handlers.NewScannerHandler(cfg.Scanner)
+	camHealthH := handlers.NewCameraHealthHandler(cfg.HealthSvc)
+	camSettingsH := handlers.NewCameraSettingsHandler(cfg.SettingsSvc)
+	camPreviewH := handlers.NewCameraPreviewHandler(cfg.PreviewSvc, tokenAuth)
+	extRTSPH := handlers.NewExternalRTSPHandler(cfg.ExternalRTSPSvc, cfg.CameraSvc)
 	ptzH := handlers.NewPTZHandler(cfg.CameraSvc)
 	docsH := handlers.NewAPIDocHandler()
 	eventH := handlers.NewEventHandler(cfg.EventSvc)
 	acsH := handlers.NewACSHandler(cfg.ACSSvc)
+	fwH := handlers.NewFirmwareHandler(cfg.FirmwareSvc)
 	recH := handlers.NewRecordingHandler(cfg.DB, cfg.VideoRepo, cfg.StorageSvc)
 	statsH := handlers.NewStatsHandler(cfg.DB)
 	detH := handlers.NewDetectionSettingsHandler(postgres.NewDetectionSettingsRepo(cfg.DB))
@@ -110,10 +124,13 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 		// внутри GetSnapshot из ?jwt= или ?token=.
 		r.Get("/cameras/{id}/snapshot", streamH.GetSnapshot)
 
+		// Превью камеры: тоже тег <img>, поэтому вне JWT-группы,
+		// токен проверяется внутри обработчика из ?jwt=.
+		r.Get("/cameras/{id}/preview", camPreviewH.Get)
+
 		// Снимок события детекции — тоже вне JWT-группы: показывается
 		// в теге <img> без возможности передать заголовок.
-		r.Get("/events/{id}/snapshot", snapH.Get)
-
+		r.Get("/acs/events/{id}/snapshot", snapH.GetACS)
 		// Файл записи с локального диска: воспроизводится в теге <video>,
 		// который не передаёт заголовок Authorization — токен идёт в query.
 		r.Get("/recordings/file", recH.File)
@@ -134,6 +151,25 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 			// Проверка адреса до сохранения: оператор сразу видит,
 			// верны ли логин, пароль и путь потока.
 			r.Post("/cameras/probe-stream", cameraH.ProbeStream)
+
+			// Здоровье камер (OpenIPC/Majestic). Маршрут /cameras/health
+			// обязан идти до /cameras/{id}, иначе chi примет "health" за id.
+			r.Get("/cameras/health", camHealthH.List)
+			r.Get("/cameras/{id}/health", camHealthH.Get)
+			r.Post("/cameras/{id}/health/collect", camHealthH.Collect)
+
+			// Внешний RTSP-доступ: адрес сервера, порт, учётные данные
+			// и список каналов с готовыми ссылками на потоки.
+			r.Get("/rtsp/settings", extRTSPH.Settings)
+			// Быстрое назначение номера канала камере — чтобы не открывать
+			// карточку камеры ради одного поля.
+			r.Post("/rtsp/channels/{cameraId}", extRTSPH.AssignChannel)
+
+			// Настройки камеры через API прошивки — без SSH.
+			r.Get("/cameras/{id}/settings", camSettingsH.Get)
+			r.Patch("/cameras/{id}/settings", camSettingsH.Update)
+			r.Post("/cameras/{id}/restart", camSettingsH.Restart)
+
 			r.Get("/cameras/{id}", cameraH.Get)
 			r.Patch("/cameras/{id}", cameraH.Update)
 			r.Delete("/cameras/{id}", cameraH.Delete)
@@ -208,9 +244,33 @@ func NewRouter(cfg RouterConfig) *chi.Mux {
 			r.Get("/acs/controllers", acsH.ListControllers)
 			r.Post("/acs/controllers", acsH.CreateController)
 			r.Get("/acs/controllers/{id}", acsH.GetController)
+			r.Put("/acs/controllers/{id}", acsH.UpdateController)
 			r.Delete("/acs/controllers/{id}", acsH.DeleteController)
+			r.Get("/acs/controllers/{id}/doors", acsH.ListDoors)
 			r.Get("/acs/events", acsH.ListEvents)
 			r.Post("/acs/doors/{controllerID}/open", acsH.OpenDoor)
+
+			// Карты доступа: серверный справочник и локальная база контроллера.
+			r.Get("/acs/cards", acsH.ListCards)
+			r.Post("/acs/cards", acsH.CreateCard)
+			r.Put("/acs/cards/{cardID}", acsH.UpdateCard)
+			r.Delete("/acs/cards/{cardID}", acsH.DeleteCard)
+			// Список событий доступа, доступных для съёмки (для интерфейса).
+			r.Get("/acs/capture-events", acsH.ListCaptureEvents)
+			r.Get("/acs/controllers/{id}/cards", acsH.ListDeviceCards)
+			r.Post("/acs/controllers/{id}/cards/sync", acsH.SyncCards)
+			r.Post("/acs/controllers/{id}/cards/import", acsH.ImportCards)
+			r.Get("/acs/controllers/{id}/cards/learn", acsH.GetCardLearnState)
+			r.Post("/acs/controllers/{id}/cards/learn", acsH.StartCardLearn)
+			r.Post("/acs/controllers/{id}/cards/learn/cancel", acsH.CancelCardLearn)
+
+			// Прошивки контроллеров СКУД: образы на сервере и OTA-обновление.
+			r.Get("/acs/firmwares", fwH.ListFirmwares)
+			r.Post("/acs/firmwares", fwH.UploadFirmware)
+			r.Delete("/acs/firmwares/{name}", fwH.DeleteFirmware)
+			r.Get("/acs/controllers/{id}/firmware", fwH.GetVersion)
+			r.Post("/acs/controllers/{id}/firmware", fwH.StartUpdate)
+			r.Get("/acs/controllers/{id}/firmware/update", fwH.GetUpdate)
 
 			// Статистика
 			r.Get("/stats", statsH.Get)

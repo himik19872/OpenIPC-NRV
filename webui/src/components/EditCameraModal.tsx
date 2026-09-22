@@ -29,6 +29,11 @@ export default function EditCameraModal({ camera, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [ptz, setPtz] = useState(!!camera.ptz)
+  // Номер канала для внешнего RTSP-доступа. Пустая строка означает
+  // «не публиковать»: камера останется доступна только внутри системы.
+  const [channel, setChannel] = useState(
+    camera.channel_number != null ? String(camera.channel_number) : '',
+  )
   // Результаты проверки по каждому потоку: 'main' и 'sub'.
   const [probe, setProbe] = useState<Record<string, StreamProbeResult | null>>({})
   const [probing, setProbing] = useState<string | null>(null)
@@ -89,7 +94,8 @@ export default function EditCameraModal({ camera, onClose, onSaved }: Props) {
 
     // Отправляем только изменённые поля — бэкенд перерегистрирует потоки
     // в MediaMTX, если поменялись адреса или креды.
-    const payload: Record<string, string> = {}
+    // Тип расширен числом: номер канала передаётся как число.
+    const payload: Record<string, string | number> = {}
     if (form.name !== camera.name) payload.name = form.name
     if (form.ip !== (camera.ip || '')) payload.ip = form.ip
     if (form.mac !== (camera.mac || '')) payload.mac = form.mac
@@ -100,6 +106,20 @@ export default function EditCameraModal({ camera, onClose, onSaved }: Props) {
     if (form.wg_ip !== (camera.wg_ip || '')) payload.wg_ip = form.wg_ip
     // ptz — булево поле, тип payload расширяем через any при отправке.
     const ptzChanged = ptz !== !!camera.ptz
+
+    // Номер канала меняет внешний адрес потока. Пустое значение снимает
+    // камеру с публикации (бэкенд трактует 0 как «убрать адрес»).
+    const oldChannel = camera.channel_number ?? 0
+    const newChannel = channel.trim() === '' ? 0 : Number(channel)
+    const channelChanged = newChannel !== oldChannel
+    if (channelChanged) {
+      if (newChannel !== 0 && (!Number.isInteger(newChannel) || newChannel < 1)) {
+        setSaving(false)
+        setError('Номер канала — целое число от 1 и выше')
+        return
+      }
+      payload.channel_number = newChannel
+    }
 
     const oldUser = (camera.settings?.username as string) || ''
     const oldPass = (camera.settings?.password as string) || ''
@@ -145,6 +165,34 @@ export default function EditCameraModal({ camera, onClose, onSaved }: Props) {
               <input className="input" value={form.wg_ip} onChange={set('wg_ip')} placeholder="10.99.0.2" />
             </Field>
           </div>
+
+          {/* Номер канала задаёт адрес потока для внешних систем.
+              Смещение на минус один: канал 1 → cameras/0. */}
+          <Field label="Номер канала (для внешнего RTSP)">
+            <input
+              className="input"
+              value={channel}
+              onChange={(e) => setChannel(e.target.value)}
+              placeholder="1"
+              inputMode="numeric"
+            />
+            {channel.trim() !== '' && Number(channel) >= 1 && (
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>
+                Адреса потоков:
+                <div style={{ fontFamily: 'monospace', marginTop: 4, wordBreak: 'break-all' }}>
+                  rtsp://логин:пароль@сервер:9784/cameras/{Number(channel) - 1}/streaming/main
+                </div>
+                <div style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                  rtsp://логин:пароль@сервер:9784/cameras/{Number(channel) - 1}/streaming/sub
+                </div>
+              </div>
+            )}
+            {channel.trim() === '' && (
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>
+                Без номера камера не публикуется для внешних систем.
+              </div>
+            )}
+          </Field>
 
           <div className="grid grid-2" style={{ gap: 12 }}>
             <Field label="MAC-адрес">

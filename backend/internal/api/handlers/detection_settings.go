@@ -47,7 +47,7 @@ func (h *DetectionSettingsHandler) RetentionPreview(w http.ResponseWriter, r *ht
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"expired":        rep,
+		"expired": rep,
 		"retention_days": map[string]int{
 			"recordings": settings.Storage.RetentionDays,
 			"snapshots":  settings.Snapshots.RetentionDays,

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nvr/backend/internal/domain"
 	"github.com/nvr/backend/internal/repository/postgres"
 	"github.com/rs/zerolog/log"
@@ -23,6 +26,9 @@ type CameraService struct {
 	client      *http.Client
 	ssh         *CameraSSH
 	ptz         *PTZServiceClient
+	// externalRTSP публикует потоки под внешними адресами для сторонних
+	// систем. Может быть nil, если внешний доступ не настроен.
+	externalRTSP *ExternalRTSPService
 }
 
 func NewCameraService(repo *postgres.CameraRepo, mediamtxAPI string) *CameraService {
@@ -36,6 +42,28 @@ func NewCameraService(repo *postgres.CameraRepo, mediamtxAPI string) *CameraServ
 		ssh:         NewCameraSSH(),
 		ptz:         NewPTZServiceClient(),
 	}
+}
+
+// WithExternalRTSP подключает публикацию потоков для внешних систем.
+//
+// Вызывается после создания сервиса: так сервис камер не зависит от
+// сервиса внешнего доступа на этапе создания, и его можно собрать
+// без внешнего контура (например, в тестах).
+func (s *CameraService) WithExternalRTSP(svc *ExternalRTSPService) *CameraService {
+	s.externalRTSP = svc
+	return s
+}
+
+// isDuplicateKey сообщает, что запись отклонена из-за нарушения
+// уникальности. Нужна, чтобы показать оператору причину, а не текст
+// драйвера базы данных.
+func isDuplicateKey(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	// Драйвер может вернуть ошибку обёрнутой — тогда проверяем текст.
+	return strings.Contains(err.Error(), "duplicate key")
 }
 
 // --- PTZ (ONVIF) ---
@@ -239,6 +267,23 @@ func (s *CameraService) Create(ctx context.Context, req domain.CreateCameraReque
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}
+	// Номер канала задаёт адрес для внешнего RTSP-доступа. Он необязателен:
+	// без него камера просто не публикуется во внешний контур.
+	//
+	// Если номер не указан, назначаем свободный автоматически: тогда новая
+	// камера сразу появляется на странице внешнего доступа, и оператору
+	// не нужно помнить про этот шаг. Номер можно изменить или убрать
+	// в карточке камеры.
+	cam.ChannelNumber = req.ChannelNumber
+	if cam.ChannelNumber == nil {
+		if next, err := s.repo.NextFreeChannel(ctx); err == nil {
+			cam.ChannelNumber = &next
+		} else {
+			// Не удалось определить номер — не отказываем в создании
+			// камеры: сама камера важнее, а номер зададут вручную.
+			log.Warn().Err(err).Msg("не удалось назначить номер канала, задайте вручную")
+		}
+	}
 	if req.WGIP != "" {
 		cam.WGIP = req.WGIP
 	}
@@ -272,6 +317,16 @@ func (s *CameraService) Create(ctx context.Context, req domain.CreateCameraReque
 	// Регистрируем RTSP-источники в MediaMTX
 	s.registerStreams(cam, req.Username, req.Password)
 
+	// Публикуем потоки под внешним адресом, если каналу задан номер.
+	// Ошибку не возвращаем: камера уже создана и работает, а внешний
+	// адрес можно назначить позже через карточку камеры.
+	if cam.ChannelNumber != nil && s.externalRTSP != nil {
+		if err := s.externalRTSP.Publish(ctx, cam.ID, *cam.ChannelNumber); err != nil {
+			log.Warn().Str("камера", cam.IP).Int("канал", *cam.ChannelNumber).
+				Err(err).Msg("не удалось опубликовать внешний RTSP-адрес")
+		}
+	}
+
 	return cam, nil
 }
 
@@ -302,7 +357,15 @@ func (s *CameraService) registerStreams(cam *domain.Camera, username, password s
 		mainRTSP = cam.RTSPUrl
 	}
 	if mainRTSP != "" {
-		go s.addMediaMTXPath(cam.ID.String(), EmbedCredentials(mainRTSP, username, password))
+		embedded := EmbedCredentials(mainRTSP, username, password)
+		// Логируем подстановку учётных данных: без этого не видно, почему
+		// MediaMTX получает 401 — камера жива, а поток не поднимается.
+		if embedded == mainRTSP && !strings.Contains(mainRTSP, "@") {
+			log.Warn().Str("camera_id", cam.ID.String()[:8]).
+				Str("source", mainRTSP).
+				Msg("в потоке камеры нет учётных данных, а в настройках они не найдены")
+		}
+		go s.addMediaMTXPath(cam.ID.String(), embedded)
 	}
 	if cam.SubStream != "" {
 		go s.addMediaMTXPath(cam.ID.String()+"_sub", EmbedCredentials(cam.SubStream, username, password))
@@ -329,6 +392,12 @@ func (s *CameraService) RestoreStreams(ctx context.Context) {
 		if mainRTSP == "" {
 			continue
 		}
+		// Показываем, что именно пришло из базы: без этого не понять,
+		// почему учётные данные не подставляются в поток.
+		log.Debug().Str("camera_id", cam.ID.String()[:8]).
+			Int("settings_keys", len(cam.Settings)).
+			Str("settings", fmt.Sprintf("%v", cam.Settings)).
+			Msg("восстановление потока камеры")
 		s.registerStreams(&cam, "", "")
 		restored++
 	}
@@ -462,23 +531,44 @@ type rspsSource struct {
 // patchMediaMTXPath меняет источник уже существующего пути MediaMTX.
 // Нужен при смене адреса или учётных данных камеры: без него MediaMTX
 // продолжает подключаться по старому URL и путь остаётся нерабочим.
+//
+// ВАЖНО: MediaMTX принимает PATCH на существующий путь, отвечает
+// {"status":"ok"}, но источник при этом НЕ меняется — проверено на живом
+// сервере. Поэтому путь удаляется и создаётся заново: только так новый
+// адрес вступает в силу.
 func (s *CameraService) patchMediaMTXPath(pathName string, patch rspsSource) {
 	if patch.RTSPTransport == "" {
 		patch.RTSPTransport = "tcp"
 	}
-	body, _ := json.Marshal(patch)
 
-	url := fmt.Sprintf("%s/v3/config/paths/patch/%s", s.mediamtxAPI, pathName)
-	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	// Удаляем старый путь. Ошибку не считаем фатальной: если пути нет,
+	// следующее создание просто его добавит.
+	delURL := fmt.Sprintf("%s/v3/config/paths/delete/%s", s.mediamtxAPI, pathName)
+	if req, err := http.NewRequest(http.MethodDelete, delURL, nil); err == nil {
+		if resp, err := s.client.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
+
+	// Создаём путь с новым источником.
+	payload := map[string]interface{}{
+		"source":         patch.Source,
+		"sourceOnDemand": false,
+		"rtspTransport":  patch.RTSPTransport,
+	}
+	body, _ := json.Marshal(payload)
+
+	addURL := fmt.Sprintf("%s/v3/config/paths/add/%s", s.mediamtxAPI, pathName)
+	req, err := http.NewRequest(http.MethodPost, addURL, bytes.NewReader(body))
 	if err != nil {
-		log.Warn().Err(err).Str("path", pathName).Msg("failed to build MediaMTX patch request")
+		log.Warn().Err(err).Str("path", pathName).Msg("failed to build MediaMTX add request")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		log.Warn().Err(err).Str("path", pathName).Msg("failed to patch MediaMTX path")
+		log.Warn().Err(err).Str("path", pathName).Msg("failed to recreate MediaMTX path")
 		return
 	}
 	defer resp.Body.Close()
@@ -488,14 +578,13 @@ func (s *CameraService) patchMediaMTXPath(pathName string, patch rspsSource) {
 			Msg("MediaMTX path source updated")
 		return
 	}
+
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	log.Warn().Str("path", pathName).Int("status", resp.StatusCode).
 		Str("body", strings.TrimSpace(string(respBody))).
-		Msg("MediaMTX patch returned non-OK status")
+		Msg("MediaMTX не принял обновлённый путь")
 }
 
-// removeMediaMTXPath удаляет путь из MediaMTX.
-// В MediaMTX v3 используется DELETE /v3/config/paths/delete/{name}.
 // (POST .../remove/{name} не существует и возвращает 404.)
 func (s *CameraService) removeMediaMTXPath(pathName string) error {
 	url := fmt.Sprintf("%s/v3/config/paths/delete/%s", s.mediamtxAPI, pathName)
@@ -581,9 +670,50 @@ func (s *CameraService) Update(ctx context.Context, id uuid.UUID, req domain.Upd
 		cam.PTZ = *req.PTZ
 	}
 
+	// Смена номера канала меняет внешний адрес потока. Запоминаем
+	// прежний номер: по нему нужно снять старый адрес, иначе он
+	// продолжит отдавать поток и внешняя система получит не ту камеру.
+	oldChannel := 0
+	if cam.ChannelNumber != nil {
+		oldChannel = *cam.ChannelNumber
+	}
+	newChannel := oldChannel
+	if req.ChannelNumber != nil {
+		if *req.ChannelNumber <= 0 {
+			// Ноль и отрицательные значения означают «снять с публикации».
+			cam.ChannelNumber = nil
+			newChannel = 0
+		} else {
+			cam.ChannelNumber = req.ChannelNumber
+			newChannel = *req.ChannelNumber
+		}
+	}
+
 	cam.UpdatedAt = time.Now()
 	if err := s.repo.Update(ctx, cam); err != nil {
+		// Номер канала уникален: два канала с одним номером сделали бы
+		// внешний адрес неоднозначным. Сообщение драйвера техническое,
+		// поэтому объясняем причину оператору.
+		if newChannel != oldChannel && isDuplicateKey(err) {
+			return nil, fmt.Errorf("номер канала %d уже занят другой камерой", newChannel)
+		}
 		return nil, err
+	}
+
+	// Пересобираем внешние адреса, если номер канала изменился.
+	// Делаем это после записи в БД: адрес должен соответствовать
+	// сохранённому состоянию, а не тому, что было в запросе.
+	if s.externalRTSP != nil && newChannel != oldChannel {
+		if newChannel == 0 {
+			if err := s.externalRTSP.Unpublish(ctx, oldChannel); err != nil {
+				log.Warn().Int("канал", oldChannel).Err(err).
+					Msg("не удалось снять внешний адрес")
+			}
+		} else if err := s.externalRTSP.Republish(ctx, cam.ID, oldChannel, newChannel); err != nil {
+			// Номер мог оказаться занятым другой камерой — сообщаем,
+			// но не откатываем сохранение: настройки камеры уже применены.
+			return cam, fmt.Errorf("номер канала сохранён, но внешний адрес не создан: %w", err)
+		}
 	}
 
 	// Если изменились потоки или креды — перерегистрируем в MediaMTX.
@@ -622,7 +752,108 @@ func (s *CameraService) Update(ctx context.Context, id uuid.UUID, req domain.Upd
 	return cam, nil
 }
 
+// ExternalChannels возвращает каналы, опубликованные для внешнего доступа,
+// и камеры без назначенного номера.
+//
+// Первый список — то, что уже отдаётся внешним системам. Второй нужен,
+// чтобы оператор видел: эти камеры наружу не публикуются, и номер можно
+// назначить прямо на странице, не переходя в карточку.
+func (s *CameraService) ExternalChannels(ctx context.Context) ([]ExternalChannel, []ExternalChannel, error) {
+	cameras, err := s.repo.List(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	published := make([]ExternalChannel, 0, len(cameras))
+	unassigned := make([]ExternalChannel, 0)
+
+	for _, cam := range cameras {
+		if cam.ChannelNumber == nil {
+			// Канал без номера: адреса у него нет, но имя и IP нужны,
+			// чтобы оператор понимал, о какой камере речь.
+			unassigned = append(unassigned, ExternalChannel{
+				CameraID:   cam.ID.String(),
+				CameraName: cam.Name,
+				IP:         cam.IP,
+				Status:     cam.Status,
+			})
+			continue
+		}
+
+		published = append(published, ExternalChannel{
+			Number:     *cam.ChannelNumber,
+			Index:      *cam.ChannelNumber - 1,
+			CameraID:   cam.ID.String(),
+			CameraName: cam.Name,
+			IP:         cam.IP,
+			Status:     cam.Status,
+			MainPath:   "/" + ExternalPathForChannel(*cam.ChannelNumber, "main"),
+			SubPath:    "/" + ExternalPathForChannel(*cam.ChannelNumber, "sub"),
+		})
+	}
+
+	// Порядок по номеру канала: так список совпадает с тем, что видит
+	// внешняя система при перечислении каналов.
+	sort.Slice(published, func(i, j int) bool {
+		return published[i].Number < published[j].Number
+	})
+	// Камеры без номера — по имени: их порядок значения не имеет,
+	// важно лишь, чтобы список был стабильным между обновлениями.
+	sort.Slice(unassigned, func(i, j int) bool {
+		return unassigned[i].CameraName < unassigned[j].CameraName
+	})
+
+	return published, unassigned, nil
+}
+
+// AssignChannel задаёт номер канала камере и публикует её потоки.
+//
+// Отдельный метод для быстрого назначения со страницы внешнего доступа:
+// оператору не нужно открывать карточку камеры ради одного поля.
+func (s *CameraService) AssignChannel(ctx context.Context, id uuid.UUID, channel int) error {
+	if channel <= 0 {
+		return fmt.Errorf("номер канала должен быть больше нуля")
+	}
+
+	cam, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	oldChannel := 0
+	if cam.ChannelNumber != nil {
+		oldChannel = *cam.ChannelNumber
+	}
+	cam.ChannelNumber = &channel
+	cam.UpdatedAt = time.Now()
+
+	if err := s.repo.Update(ctx, cam); err != nil {
+		if isDuplicateKey(err) {
+			return fmt.Errorf("номер канала %d уже занят другой камерой", channel)
+		}
+		return err
+	}
+
+	if s.externalRTSP != nil {
+		if err := s.externalRTSP.Republish(ctx, cam.ID, oldChannel, channel); err != nil {
+			return fmt.Errorf("номер сохранён, но внешний адрес не создан: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *CameraService) Delete(ctx context.Context, id uuid.UUID) error {
+	// Снимаем внешний адрес до удаления записи: после удаления узнать
+	// номер канала будет уже неоткуда, и путь остался бы висеть.
+	if s.externalRTSP != nil {
+		if cam, err := s.repo.GetByID(ctx, id); err == nil && cam.ChannelNumber != nil {
+			if err := s.externalRTSP.Unpublish(ctx, *cam.ChannelNumber); err != nil {
+				log.Warn().Int("канал", *cam.ChannelNumber).Err(err).
+					Msg("не удалось снять внешний адрес")
+			}
+		}
+	}
+
 	// Пути удаляем синхронно и до удаления записи из БД: так мы гарантируем,
 	// что не останется висячих путей, даже если запрос прервётся.
 	// Ошибки логируются внутри removeMediaMTXPath и не блокируют удаление.

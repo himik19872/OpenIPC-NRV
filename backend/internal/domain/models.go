@@ -8,22 +8,27 @@ import (
 
 // Camera — модель камеры
 type Camera struct {
-	ID         uuid.UUID      `json:"id"`
-	Name       string         `json:"name"`
-	RTSPUrl    string         `json:"rtsp_url"`
-	MainStream string         `json:"main_stream,omitempty"` // rtsp://.../stream=0
-	SubStream  string         `json:"sub_stream,omitempty"`  // rtsp://.../stream=1
-	IP         string         `json:"ip,omitempty"`          // 192.168.1.75
-	MAC        string         `json:"mac,omitempty"`
-	Firmware   string         `json:"firmware,omitempty"`
-	SiteID     *uuid.UUID     `json:"site_id,omitempty"`
-	WGIP       string         `json:"wg_ip,omitempty"`
-	Status     string         `json:"status"` // online, offline, recording
-	PTZ        bool           `json:"ptz"`    // поддерживает ли камера поворот (ONVIF PTZ)
-	HWInfo     map[string]any `json:"hw_info,omitempty"`
-	Settings   map[string]any `json:"settings,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	ID         uuid.UUID  `json:"id"`
+	Name       string     `json:"name"`
+	RTSPUrl    string     `json:"rtsp_url"`
+	MainStream string     `json:"main_stream,omitempty"` // rtsp://.../stream=0
+	SubStream  string     `json:"sub_stream,omitempty"`  // rtsp://.../stream=1
+	IP         string     `json:"ip,omitempty"`          // 192.168.1.75
+	MAC        string     `json:"mac,omitempty"`
+	Firmware   string     `json:"firmware,omitempty"`
+	SiteID     *uuid.UUID `json:"site_id,omitempty"`
+	WGIP       string     `json:"wg_ip,omitempty"`
+	Status     string     `json:"status"` // online, offline, recording
+	PTZ        bool       `json:"ptz"`    // поддерживает ли камера поворот (ONVIF PTZ)
+	// ChannelNumber — номер канала для внешнего RTSP-доступа. В адресе
+	// потока он идёт со смещением на минус один: канал 1 это cameras/0.
+	// nil означает, что канал не назначен и камера по внешнему адресу
+	// недоступна.
+	ChannelNumber *int           `json:"channel_number,omitempty"`
+	HWInfo        map[string]any `json:"hw_info,omitempty"`
+	Settings      map[string]any `json:"settings,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 // Site — объект размещения камер
@@ -68,20 +73,62 @@ type ACSEvent struct {
 	CameraID     *uuid.UUID     `json:"camera_id,omitempty"`
 	SnapshotPath string         `json:"snapshot_path,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
+
+	// MediaType — что снято по этому событию: snapshot или clip.
+	// Пусто, если съёмка не выполнялась.
+	MediaType string `json:"media_type,omitempty"`
+	// RecordingID ссылается на запись архива: по нему из журнала СКУД
+	// открывается видео события.
+	RecordingID *uuid.UUID `json:"recording_id,omitempty"`
+	// CardName — имя владельца карты, подставленное при выдаче.
+	// В БД не хранится: это расшифровка для интерфейса.
+	CardName string `json:"card_name,omitempty"`
 }
 
 // ACSController — контроллер СКУД
 type ACSController struct {
 	ID          uuid.UUID      `json:"id"`
 	Name        string         `json:"name"`
-	Vendor      string         `json:"vendor"` // hikvision, dahua, promwad
+	Vendor      string         `json:"vendor"` // hikvision, dahua, promwad, skud
 	IP          string         `json:"ip"`
 	Port        int            `json:"port"`
 	Credentials map[string]any `json:"-"`
 	SiteID      *uuid.UUID     `json:"site_id,omitempty"`
 	Status      string         `json:"status"` // online, offline
 	Config      map[string]any `json:"config,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
+
+	// CameraID — камера, наблюдающая за проёмом. Съёмка по событиям
+	// доступа возможна только при заданной камере.
+	CameraID *uuid.UUID `json:"camera_id,omitempty"`
+	// CaptureMode: off — не снимать, snapshot — один кадр, clip — видео.
+	CaptureMode string `json:"capture_mode"`
+	// CaptureEvents — события доступа, по которым идёт съёмка.
+	// Пустой список означает «на все события».
+	CaptureEvents []string `json:"capture_events"`
+	// ClipSeconds — длительность клипа при CaptureMode = clip.
+	ClipSeconds int `json:"clip_seconds"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ACSCard — карта доступа.
+//
+// Пара facility+card — это содержимое кода Wiegand: facility занимает
+// 8 бит, номер карты — 16 бит. Именно эта пара, а не отдельный id,
+// идентифицирует карту на контроллере.
+type ACSCard struct {
+	// ID заполнен только у карт, хранящихся на сервере. У карт, прочитанных
+	// прямо с контроллера, он пустой: там карта адресуется парой
+	// facility+card.
+	ID           uuid.UUID `json:"id,omitempty"`
+	ControllerID uuid.UUID `json:"controller_id"`
+	Facility     int       `json:"facility"`
+	CardNumber   int       `json:"card"`
+	Name         string    `json:"name"`
+	Group        string    `json:"group,omitempty"`
+	// Access: 0 — постоянный доступ, 1 — только по расписанию.
+	Access int  `json:"access"`
+	Active bool `json:"active"`
 }
 
 // Recording — запись видео
@@ -454,6 +501,10 @@ const (
 	TriggerFace TriggerType = "face"
 	// TriggerPlate — распознан автомобильный номер.
 	TriggerPlate TriggerType = "plate"
+	// TriggerACS — запись создана по событию доступа СКУД.
+	// Причина внешняя по отношению к видеоаналитике: сработал считыватель,
+	// кнопка выхода или датчик двери.
+	TriggerACS TriggerType = "acs"
 )
 
 // UpdateServerSettingsRequest — частичное обновление настроек сервера.
@@ -476,6 +527,8 @@ type CreateCameraRequest struct {
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"password,omitempty"`
 	PTZ        bool   `json:"ptz,omitempty"`
+	// ChannelNumber — номер канала для внешнего RTSP-доступа (канал 1 → cameras/0).
+	ChannelNumber *int `json:"channel_number,omitempty"`
 }
 
 type UpdateCameraRequest struct {
@@ -490,6 +543,8 @@ type UpdateCameraRequest struct {
 	Username   *string `json:"username,omitempty"`
 	Password   *string `json:"password,omitempty"`
 	PTZ        *bool   `json:"ptz,omitempty"`
+	// ChannelNumber — номер канала для внешнего RTSP-доступа.
+	ChannelNumber *int `json:"channel_number,omitempty"`
 }
 
 // ScanRequest — запрос на сканирование подсети для поиска OpenIPC-камер
@@ -524,7 +579,7 @@ type ScanResult struct {
 
 type CreateACSControllerRequest struct {
 	Name     string `json:"name" validate:"required"`
-	Vendor   string `json:"vendor" validate:"required,oneof=hikvision dahua promwad"`
+	Vendor   string `json:"vendor" validate:"required,oneof=hikvision dahua promwad skud"`
 	IP       string `json:"ip" validate:"required,ip"`
 	Port     int    `json:"port" validate:"min=1,max=65535"`
 	Login    string `json:"login"`
@@ -535,6 +590,38 @@ type CreateACSControllerRequest struct {
 type LoginRequest struct {
 	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required"`
+}
+
+// UpdateACSControllerRequest — изменение параметров контроллера СКУД.
+//
+// Vendor не меняется: он определяет протокол общения, и смена вендора
+// означала бы другое устройство, а не правку его адреса.
+type UpdateACSControllerRequest struct {
+	Name     string `json:"name" validate:"required"`
+	IP       string `json:"ip" validate:"required,ip"`
+	Port     int    `json:"port" validate:"min=1,max=65535"`
+	Login    string `json:"login"`
+	Password string `json:"password"`
+	SiteID   string `json:"site_id,omitempty"`
+
+	// CameraID — UUID камеры. Пустая строка отвязывает камеру.
+	CameraID string `json:"camera_id"`
+	// CaptureMode: off, snapshot, clip.
+	CaptureMode string `json:"capture_mode"`
+	// CaptureEvents — список событий доступа для съёмки.
+	CaptureEvents []string `json:"capture_events"`
+	ClipSeconds   int      `json:"clip_seconds"`
+}
+
+// AddACSCardRequest — заведение карты доступа.
+type AddACSCardRequest struct {
+	ControllerID string `json:"controller_id" validate:"required,uuid"`
+	Facility     int    `json:"facility" validate:"min=0,max=255"`
+	Card         int    `json:"card" validate:"min=0,max=65535"`
+	Name         string `json:"name"`
+	Group        string `json:"group"`
+	Access       int    `json:"access" validate:"min=0,max=1"`
+	Active       *bool  `json:"active,omitempty"`
 }
 
 type LoginResponse struct {

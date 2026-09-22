@@ -26,7 +26,8 @@ func (r *CameraRepo) List(ctx context.Context) ([]domain.Camera, error) {
 			COALESCE(ip, '') as ip,
 			COALESCE(mac, '') as mac,
 			COALESCE(firmware, '') as firmware,
-			site_id, COALESCE(wg_ip::text, '') as wg_ip, status, hw_info, settings, created_at, updated_at
+			site_id, COALESCE(wg_ip::text, '') as wg_ip, status, hw_info, settings,
+			channel_number, created_at, updated_at
 		FROM cameras ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -40,7 +41,7 @@ func (r *CameraRepo) List(ctx context.Context) ([]domain.Camera, error) {
 		var hwInfo, settings []byte
 		if err := rows.Scan(&c.ID, &c.Name, &c.RTSPUrl, &c.MainStream, &c.SubStream, &c.IP, &c.MAC, &c.Firmware,
 			&c.SiteID, &c.WGIP,
-			&c.Status, &hwInfo, &settings, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.Status, &hwInfo, &settings, &c.ChannelNumber, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if hwInfo != nil {
@@ -77,11 +78,12 @@ func (r *CameraRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.Camera,
 			COALESCE(ip, '') as ip,
 			COALESCE(mac, '') as mac,
 			COALESCE(firmware, '') as firmware,
-			site_id, COALESCE(wg_ip::text, '') as wg_ip, status, hw_info, settings, created_at, updated_at
+			site_id, COALESCE(wg_ip::text, '') as wg_ip, status, hw_info, settings,
+			channel_number, created_at, updated_at
 		FROM cameras WHERE id = $1
 	`, id).Scan(&c.ID, &c.Name, &c.RTSPUrl, &c.MainStream, &c.SubStream, &c.IP, &c.MAC, &c.Firmware,
 		&c.SiteID, &c.WGIP,
-		&c.Status, &hwInfo, &settings, &c.CreatedAt, &c.UpdatedAt)
+		&c.Status, &hwInfo, &settings, &c.ChannelNumber, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -99,11 +101,11 @@ func (r *CameraRepo) Create(ctx context.Context, cam *domain.Camera) error {
 	hwInfo, _ := json.Marshal(cam.HWInfo)
 	settings, _ := json.Marshal(cam.Settings)
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO cameras (id, name, rtsp_url, main_stream, sub_stream, ip, mac, firmware, site_id, wg_ip, status, hw_info, settings, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet, $11, $12, $13, $14, $15)
+		INSERT INTO cameras (id, name, rtsp_url, main_stream, sub_stream, ip, mac, firmware, site_id, wg_ip, status, hw_info, settings, channel_number, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet, $11, $12, $13, $14, $15, $16)
 	`, cam.ID, cam.Name, cam.RTSPUrl, cam.MainStream, cam.SubStream, cam.IP, cam.MAC, cam.Firmware,
 		cam.SiteID, cam.WGIP,
-		cam.Status, hwInfo, settings, cam.CreatedAt, cam.UpdatedAt)
+		cam.Status, hwInfo, settings, cam.ChannelNumber, cam.CreatedAt, cam.UpdatedAt)
 	return err
 }
 
@@ -114,16 +116,44 @@ func (r *CameraRepo) Update(ctx context.Context, cam *domain.Camera) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE cameras SET name=$2, rtsp_url=$3, main_stream=$4, sub_stream=$5, ip=$6, mac=$7, firmware=$8,
 		site_id=$9, wg_ip=NULLIF($10, '')::inet, status=$11,
-		hw_info=$12, settings=$13, updated_at=$14 WHERE id=$1
+		hw_info=$12, settings=$13, channel_number=$14, updated_at=$15 WHERE id=$1
 	`, cam.ID, cam.Name, cam.RTSPUrl, cam.MainStream, cam.SubStream, cam.IP, cam.MAC, cam.Firmware,
 		cam.SiteID, cam.WGIP,
-		cam.Status, hwInfo, settings, cam.UpdatedAt)
+		cam.Status, hwInfo, settings, cam.ChannelNumber, cam.UpdatedAt)
 	return err
 }
 
 func (r *CameraRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM cameras WHERE id = $1`, id)
 	return err
+}
+
+// NextFreeChannel возвращает наименьший свободный номер канала.
+//
+// Номер нужен при добавлении камеры, чтобы она сразу попала в список
+// внешнего доступа: без него оператору пришлось бы открывать карточку
+// и задавать номер вручную.
+//
+// Берём именно наименьший свободный номер, а не «максимум + 1»:
+// удалённые камеры освобождают номера, и после нескольких удалений
+// нумерация уезжала бы вверх, оставляя дыры. Внешним системам удобнее,
+// когда каналы идут подряд.
+func (r *CameraRepo) NextFreeChannel(ctx context.Context) (int, error) {
+	var next int
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(MIN(candidate), 1)
+		FROM (
+			SELECT gs AS candidate
+			FROM generate_series(1, COALESCE((SELECT MAX(channel_number) FROM cameras), 0) + 1) AS gs
+			WHERE NOT EXISTS (
+				SELECT 1 FROM cameras WHERE channel_number = gs
+			)
+		) AS free
+	`).Scan(&next)
+	if err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 // UpdateStatus обновляет только поле status (используется монитором доступности).

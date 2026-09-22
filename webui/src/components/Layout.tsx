@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useApi'
 import {
   LayoutDashboard, Video, AlertTriangle, HardDrive,
-  Shield, LogOut, Camera, Search, Settings, ScanFace, Volume2
+  Shield, LogOut, Camera, Search, Settings, ScanFace, Volume2, Share2
 } from 'lucide-react'
 
 const navItems = [
@@ -14,6 +14,7 @@ const navItems = [
   { to: '/recordings', icon: HardDrive, label: 'Архив' },
   { to: '/recognition', icon: ScanFace, label: 'Распознавание' },
   { to: '/acs', icon: Shield, label: 'СКУД' },
+  { to: '/external-access', icon: Share2, label: 'Внешний доступ' },
   { to: '/settings', icon: Settings, label: 'Настройки' },
 ]
 

@@ -42,6 +42,9 @@ export interface Camera {
   wg_ip?: string
   status: 'online' | 'offline' | 'recording'
   ptz?: boolean
+  // Номер канала для внешнего RTSP-доступа. В адресе потока идёт
+  // со смещением на минус один: канал 1 → cameras/0.
+  channel_number?: number
   hw_info?: Record<string, any>
   settings?: Record<string, any>
   created_at: string
@@ -53,6 +56,101 @@ export interface CameraCommandResult {
   output?: string
   success: boolean
   error?: string
+}
+
+// Сведения о камере со страницы дашборда OpenIPC.
+export interface CameraDeviceInfo {
+  soc?: string
+  sensor?: string
+  firmware?: string
+  build?: string
+  majestic?: string
+  webui?: string
+  flash?: string
+  host?: string
+  gateway?: string
+  kernel?: string
+}
+
+// Настройки камеры. Все поля необязательные: при сохранении отправляются
+// только изменённые, поэтому остальные настройки камеры не затрагиваются.
+export interface CameraSettings {
+  main_fps?: number
+  main_bitrate?: number
+  main_size?: string
+  main_codec?: string
+  sub_fps?: number
+  sub_bitrate?: number
+  sub_size?: string
+  sub_enabled?: boolean
+
+  mirror?: boolean
+  flip?: boolean
+  contrast?: number
+  hue?: number
+  saturation?: number
+  luminance?: number
+
+  night_mode?: NightMode
+  anti_flicker?: string
+
+  osd_enabled?: boolean
+  osd_template?: string
+  osd_size?: string
+  osd_pos_x?: number
+  osd_pos_y?: number
+  osd_bg_alpha?: number
+  osd_outline?: boolean
+}
+
+export interface NightMode {
+  color_to_gray?: boolean
+  ir_cut?: string
+  auto_night_delay?: number
+  auto_day_delay?: number
+  backlight?: string
+}
+
+// Настройки камеры, как их отдаёт сервер: плюс сведения об устройстве
+// и признак того, что камерой нельзя управлять (старая прошивка).
+export interface CameraSettingsView {
+  settings: CameraSettings
+  device?: CameraDeviceInfo
+  read_only: boolean
+  read_only_reason?: string
+}
+
+// Здоровье камеры OpenIPC: собирается сервером раз в минуту из метрик
+// Majestic. Уровень задаёт цвет индикатора, issues — что именно не так.
+export interface CameraHealth {
+  camera_id: string
+  camera_name: string
+  ip: string
+  supported: boolean
+  online: boolean
+  level: 'ok' | 'warning' | 'critical' | 'unknown'
+  error?: string
+  issues?: string[]
+  flowing: boolean
+  main_width?: number
+  main_height?: number
+  main_fps?: number
+  main_codec?: string
+  sub_fps?: number
+  load1?: number
+  mem_total_mb?: number
+  mem_available_mb?: number
+  isp_fps?: number
+  isp_exposure?: number
+  isp_gain?: number
+  rtsp_clients?: number
+  rtsp_mbps?: number
+  venc_empty_frames?: number
+  night_enabled?: boolean
+  uptime_sec?: number
+  kernel?: string
+  platform?: string
+  collected_at: string
 }
 
 export interface PTZStatus {
@@ -136,7 +234,50 @@ export interface ACSController {
   site_id?: string
   status: 'online' | 'offline'
   config?: Record<string, any>
+  // Камера, наблюдающая за проёмом. Без неё съёмка по событиям недоступна.
+  camera_id?: string
+  // capture_mode: off — не снимать, snapshot — кадр, clip — видео.
+  capture_mode: 'off' | 'snapshot' | 'clip'
+  // События доступа, по которым идёт съёмка. Пустой список — все события.
+  capture_events: string[]
+  clip_seconds: number
   created_at: string
+}
+
+// ACSCaptureEvent — событие доступа, доступное для съёмки.
+export interface ACSCaptureEvent {
+  value: string
+  label: string
+}
+
+// FirmwareImage — образ прошивки, загруженный на сервер.
+export interface FirmwareImage {
+  name: string
+  // version берётся из имени файла (skud-1.0.0.bin); может быть пустой.
+  version: string
+  size: number
+  sha256: string
+  uploaded_at: string
+}
+
+// FirmwareInfo — прошивка, установленная на контроллере.
+export interface FirmwareInfo {
+  version: string
+  build: string
+}
+
+// OTAUpdate — состояние обновления контроллера.
+export interface OTAUpdate {
+  controller_id: string
+  // state: running — идёт, done — успешно, failed — ошибка, idle — не запускалось.
+  state: 'running' | 'done' | 'failed' | 'idle'
+  // step: upload, reboot, verify, done.
+  step: string
+  message: string
+  from_version?: string
+  to_version?: string
+  started_at?: string
+  finished_at?: string
 }
 
 export interface ACSEvent {
@@ -149,6 +290,27 @@ export interface ACSEvent {
   timestamp: string
   camera_id?: string
   snapshot_path?: string
+  // media_type — что снято: snapshot или clip. Пусто, если съёмки не было.
+  media_type?: 'snapshot' | 'clip'
+  recording_id?: string
+  // card_name — имя владельца карты, подставленное сервером.
+  card_name?: string
+}
+
+// ACSCard — карта доступа. Пара facility+card — это код Wiegand,
+// именно она идентифицирует карту на контроллере.
+export interface ACSCard {
+  // id пустой у карт, прочитанных напрямую с контроллера: они
+  // адресуются парой facility+card, а не серверным идентификатором.
+  id?: string
+  controller_id: string
+  facility: number
+  card: number
+  name: string
+  group?: string
+  // access: 0 — постоянный доступ, 1 — только по расписанию.
+  access: number
+  active: boolean
 }
 
 export interface Stats {
@@ -242,6 +404,41 @@ export const authAPI = {
     api.post<{ token: string; expires_at: number; user: any }>('/auth/login', { username, password }),
 }
 
+// Канал внешнего RTSP-доступа: готовые адреса потоков.
+export interface ExternalChannel {
+  // number — номер так, как его задал оператор (с 1).
+  // Для камер без номера поле отсутствует.
+  number?: number
+  // index — номер в адресе потока (со смещением на минус один).
+  index?: number
+  camera_id: string
+  camera_name: string
+  ip?: string
+  status: string
+  main_path?: string
+  sub_path?: string
+}
+
+export interface ExternalRTSPSettings {
+  port: number
+  username: string
+  password: string
+  server_ip: string
+  channels: ExternalChannel[]
+  // Камеры без номера канала: наружу не публикуются.
+  unassigned: ExternalChannel[]
+  // Свободный номер для формы быстрого назначения.
+  next_channel: number
+}
+
+export const rtspAPI = {
+  // Параметры подключения и список каналов для сторонних систем.
+  settings: () => api.get<ExternalRTSPSettings>('/rtsp/settings'),
+  // Назначить номер канала камере прямо со страницы внешнего доступа.
+  assignChannel: (cameraId: string, channel: number) =>
+    api.post<ExternalRTSPSettings>(`/rtsp/channels/${cameraId}`, { channel }),
+}
+
 export const camerasAPI = {
   list: () => api.get<Camera[]>('/cameras'),
   get: (id: string) => api.get<Camera>(`/cameras/${id}`),
@@ -250,11 +447,13 @@ export const camerasAPI = {
   create: (data: {
     name: string; rtsp_url?: string; main_stream?: string; sub_stream?: string;
     ip?: string; mac?: string; firmware?: string; username?: string; password?: string;
+    channel_number?: number;
   }) => api.post<Camera>('/cameras', data),
   update: (id: string, data: {
     name?: string; rtsp_url?: string; main_stream?: string; sub_stream?: string;
     ip?: string; mac?: string; firmware?: string; status?: string;
     username?: string; password?: string; wg_ip?: string; ptz?: boolean;
+    channel_number?: number;
   }) => api.patch<Camera>(`/cameras/${id}`, data),
   delete: (id: string) => api.delete(`/cameras/${id}`),
   // Перезапуск стримера камеры (служба Majestic на OpenIPC)
@@ -270,6 +469,25 @@ export const camerasAPI = {
   // либо понятное объяснение (неверный пароль, нет видео, таймаут).
   probeStream: (data: { rtsp_url: string; username?: string; password?: string }) =>
     api.post<StreamProbeResult>('/cameras/probe-stream', data),
+
+  // Здоровье всех камер (OpenIPC): загрузка, память, fps сенсора.
+  // Проблемные камеры идут первыми, поэтому список можно показывать как есть.
+  health: () => api.get<CameraHealth[]>('/cameras/health'),
+  // Здоровье одной камеры из кэша сервера.
+  getHealth: (id: string) => api.get<CameraHealth>(`/cameras/${id}/health`),
+  // Немедленный опрос камеры, не дожидаясь следующего цикла (раз в минуту).
+  collectHealth: (id: string) =>
+    api.post<CameraHealth>(`/cameras/${id}/health/collect`, {}),
+
+  // Настройки камеры через API прошивки (без SSH).
+  getSettings: (id: string) => api.get<CameraSettingsView>(`/cameras/${id}/settings`),
+  // Отправляются только изменённые поля: сервер пишет именно их,
+  // остальные настройки камеры не затрагиваются.
+  updateSettings: (id: string, patch: CameraSettings) =>
+    api.patch<CameraSettingsView>(`/cameras/${id}/settings`, patch),
+  // Перезапуск камеры через API прошивки вместо SSH.
+  restartCamera: (id: string) =>
+    api.post<CameraCommandResult>(`/cameras/${id}/restart`, {}),
 }
 
 export const audioAPI = {
@@ -339,11 +557,69 @@ export const acsAPI = {
   listControllers: () => api.get<ACSController[]>('/acs/controllers'),
   getController: (id: string) => api.get<ACSController>(`/acs/controllers/${id}`),
   createController: (data: any) => api.post<ACSController>('/acs/controllers', data),
+  updateController: (id: string, data: any) =>
+    api.put<ACSController>(`/acs/controllers/${id}`, data),
   deleteController: (id: string) => api.delete(`/acs/controllers/${id}`),
+  listDoors: (id: string) =>
+    api.get<{ id: string; name: string; status: string }[]>(`/acs/controllers/${id}/doors`),
   listEvents: (params?: { page?: number; page_size?: number }) =>
     api.get<PaginatedResponse<ACSEvent>>('/acs/events', { params }),
   openDoor: (controllerID: string, doorID: string) =>
     api.post(`/acs/doors/${controllerID}/open`, { door_id: doorID }),
+
+  // --- Карты доступа ---
+
+  // Серверный справочник карт. Без controller_id возвращает карты всех
+  // контроллеров.
+  listCards: (controllerID?: string) =>
+    api.get<ACSCard[]>('/acs/cards', { params: controllerID ? { controller_id: controllerID } : {} }),
+  createCard: (data: any) => api.post<ACSCard>('/acs/cards', data),
+  updateCard: (id: string, data: any) => api.put<ACSCard>(`/acs/cards/${id}`, data),
+  deleteCard: (id: string) => api.delete(`/acs/cards/${id}`),
+
+  // Карты, реально хранящиеся на контроллере. Могут отличаться от
+  // серверных, если их заводили в обход сервера.
+  listDeviceCards: (id: string) => api.get<ACSCard[]>(`/acs/controllers/${id}/cards`),
+  // Полная выдача серверной базы на контроллер.
+  syncCards: (id: string) =>
+    api.post<{ status: string; cards: number }>(`/acs/controllers/${id}/cards/sync`),
+  // Перенос карт с контроллера на сервер.
+  importCards: (id: string) =>
+    api.post<{ status: string; cards: number }>(`/acs/controllers/${id}/cards/import`),
+
+  // Режим обучения: контроллер запоминает номер поднесённой карты.
+  cardLearnState: (id: string) =>
+    api.get<{ learning: boolean }>(`/acs/controllers/${id}/cards/learn`),
+  startCardLearn: (id: string, name: string) =>
+    api.post(`/acs/controllers/${id}/cards/learn`, { name }),
+  cancelCardLearn: (id: string) =>
+    api.post(`/acs/controllers/${id}/cards/learn/cancel`),
+
+  // Список событий доступа, доступных для съёмки.
+  captureEvents: () => api.get<ACSCaptureEvent[]>('/acs/capture-events'),
+
+  // --- Прошивки и OTA ---
+
+  listFirmwares: () => api.get<FirmwareImage[]>('/acs/firmwares'),
+  // Образ передаётся телом запроса, имя — заголовком: так файл уходит
+  // одним потоком без multipart-обёртки.
+  uploadFirmware: (file: File) =>
+    api.post<FirmwareImage>('/acs/firmwares', file, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Firmware-Name': file.name,
+      },
+      timeout: 120000,
+    }),
+  deleteFirmware: (name: string) => api.delete(`/acs/firmwares/${encodeURIComponent(name)}`),
+
+  // Версия прошивки, установленной на контроллере.
+  getFirmwareVersion: (id: string) => api.get<FirmwareInfo>(`/acs/controllers/${id}/firmware`),
+  // Запуск обновления: отвечает сразу, процесс идёт в фоне.
+  startFirmwareUpdate: (id: string, firmware: string) =>
+    api.post<OTAUpdate>(`/acs/controllers/${id}/firmware`, { firmware }),
+  // Текущее состояние обновления (для опроса).
+  getUpdateState: (id: string) => api.get<OTAUpdate>(`/acs/controllers/${id}/firmware/update`),
 }
 
 export const statsAPI = {
@@ -477,7 +753,7 @@ export const settingsAPI = {
 // --- Распознавание лиц и автомобильных номеров ---
 
 // Причина, по которой создана запись архива.
-export type TriggerType = 'manual' | 'always' | 'object' | 'line' | 'face' | 'plate'
+export type TriggerType = 'manual' | 'always' | 'object' | 'line' | 'face' | 'plate' | 'acs'
 
 // Результат сравнения со справочником.
 export type MatchType = 'unknown' | 'known' | 'blocked'
@@ -539,6 +815,9 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   line: 'Пересечение линии',
   face: 'Лицо',
   plate: 'Номер авто',
+  // Запись создана по событию доступа: сработал считыватель, кнопка
+  // выхода или датчик двери. Расшифровка — в trigger_detail.
+  acs: 'СКУД (доступ)',
 }
 
 export const facesAPI = {

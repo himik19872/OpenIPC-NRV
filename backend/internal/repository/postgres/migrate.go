@@ -113,6 +113,14 @@ func adoptExistingSchema(m *migrate.Migrate, db *sql.DB) error {
 // Проверки идут от старших версий к младшим: важен самый поздний признак,
 // который есть в схеме.
 func detectSchemaVersion(db *sql.DB) uint {
+	// 009 — привязка камеры к контроллеру СКУД и съёмка по событиям
+	if columnExists(db, "acs_controllers", "capture_mode") {
+		return 9
+	}
+	// 008 — карты доступа СКУД
+	if tableExists(db, "acs_cards") {
+		return 8
+	}
 	// 007 — звук с камер и события аудиодетекции
 	if tableExists(db, "audio_settings") {
 		return 7

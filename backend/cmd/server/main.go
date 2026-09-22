@@ -53,6 +53,7 @@ func main() {
 	cameraRepo := postgres.NewCameraRepo(db)
 	eventRepo := postgres.NewEventRepo(db)
 	acsRepo := postgres.NewACSRepo(db)
+	acsCardRepo := postgres.NewACSCardRepo(db)
 	userRepo := postgres.NewUserRepo(db)
 	// Настройки детекции и хранилища нужны и API, и подписчику событий.
 	detectionSettingsRepo := postgres.NewDetectionSettingsRepo(db)
@@ -65,7 +66,12 @@ func main() {
 
 	// СКУД-адаптеры
 	acsManager := acs.NewManager(acsRepo)
-	acsSvc := service.NewACSService(acsManager, cameraRepo, eventRepo)
+	acsSvc := service.NewACSService(acsManager, acsCardRepo, cameraRepo, eventRepo)
+
+	// Фоновый сбор событий СКУД: адаптеры отдают поток, но без подписки
+	// события никуда не сохранялись. Запускаем после старта БД.
+	defer acsSvc.Stop()
+	go acsSvc.StartEventCollectors(context.Background())
 
 	// WireGuard-менеджер (если указан интерфейс)
 	var wgManager *tunnel.WireGuardManager
@@ -135,21 +141,35 @@ func main() {
 	recordingMgr := service.NewRecordingManager(detectionSettingsRepo, recorderSvc, storageSvc, cameraSvc)
 	recordingMgr.OnSaved(func(clip service.SavedClip) {
 		half := time.Duration(clip.DurationSec) * time.Second / 2
+		recordingID := uuid.New()
 		if _, err := db.Exec(context.Background(), `
 			INSERT INTO recordings (id, camera_id, start_time, end_time, file_path, file_size,
 			                        resolution, codec, event_triggered, trigger_type, trigger_detail)
 			VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), true, $9, $10)`,
-			uuid.New(), clip.CameraID,
+			recordingID, clip.CameraID,
 			clip.EventTime.Add(-half), clip.EventTime.Add(half),
 			clip.Path, clip.Size, clip.Resolution, clip.Codec,
 			triggerTypeOrDefault(clip.TriggerType), clip.TriggerDetail); err != nil {
 			log.Error().Err(err).Str("camera_id", clip.CameraID.String()[:8]).
 				Msg("не удалось сохранить запись в БД")
+			return
+		}
+		// Клип, снятый по событию СКУД, связываем с этим событием: иначе в
+		// журнале доступа не будет ссылки на запись.
+		if clip.TriggerType == domain.TriggerACS {
+			acsSvc.AttachClipToEvent(clip.CameraID, clip.Path, clip.EventTime, recordingID)
 		}
 	})
 	if detSubscriber != nil {
 		detSubscriber.WithRecording(recordingMgr)
 	}
+
+	// Съёмка по событиям доступа: подключаем камеры, хранилище и запись.
+	// Делается здесь, потому что запись видео инициализируется позже СКУД.
+	acsSvc.WithCapture(cameraSvc, storageSvc, recorderSvc, recordingMgr)
+
+	// Обновление прошивок контроллеров СКУД по OTA.
+	firmwareSvc := service.NewFirmwareService(acsSvc)
 
 	// Фоновый цикл записи: синхронизирует режимы и чистит буфер сегментов.
 	go func() {
@@ -207,21 +227,52 @@ func main() {
 		WithRestore(cameraSvc.RegisterStreams)
 	go statusMonitor.Start(context.Background())
 
+	// Мониторинг здоровья камер OpenIPC: раз в минуту читает /metrics и
+	// /api/v1/sources у Majestic, чтобы показать загрузку, память и
+	// состояние видео-потоков прямо в интерфейсе.
+	healthSvc := service.NewCameraHealthService(cameraRepo)
+	go healthSvc.Start(context.Background())
+
+	// Управление камерами через HTTP API прошивки (вместо SSH):
+	// настройки видео, изображения, ночного режима, OSD и перезапуск.
+	settingsSvc := service.NewCameraSettingsService(cameraRepo)
+
+	// Превью камер: одиночный кадр по HTTP вместо видеопотока.
+	previewSvc := service.NewCameraPreviewService(cameraRepo)
+
+	// Внешний RTSP-доступ: публикуем потоки камер под адресами
+	// /cameras/{N}/streaming/{main|sub}, чтобы сторонние системы брали
+	// поток у нас, а не подключались к камерам напрямую. Камеры слабые
+	// и ограничивают число сессий, поэтому одно подключение на камеру
+	// со стороны MediaMTX — это и есть снятие нагрузки.
+	//
+	// Запускается синхронно и после RestoreStreams: внешние пути читают
+	// внутренние, и создавать их раньше не имеет смысла — источник ещё
+	// не зарегистрирован. Порядок здесь принципиален.
+	externalRTSPSvc := service.NewExternalRTSPService(mediamtxAPI)
+	cameraSvc.WithExternalRTSP(externalRTSPSvc)
+	externalRTSPSvc.RestoreAll(context.Background(), cameraRepo)
+
 	// Инициализация роутера
 	router := api.NewRouter(api.RouterConfig{
-		CameraSvc:    cameraSvc,
-		EventSvc:     eventSvc,
-		ACSSvc:       acsSvc,
-		UserRepo:     userRepo,
-		JWTSecret:    cfg.JWTSecret,
-		WGManager:    wgManager,
-		DB:           db,
-		MediamtxHost: cfg.MediamtxHost,
-		Scanner:      scanner,
-		VideoRepo:    videoRepo,
-		StorageSvc:   storageSvc,
-		RetentionSvc: retentionSvc,
-		AudioSvc:     audioSvc,
+		CameraSvc:       cameraSvc,
+		EventSvc:        eventSvc,
+		ACSSvc:          acsSvc,
+		FirmwareSvc:     firmwareSvc,
+		UserRepo:        userRepo,
+		JWTSecret:       cfg.JWTSecret,
+		WGManager:       wgManager,
+		DB:              db,
+		MediamtxHost:    cfg.MediamtxHost,
+		Scanner:         scanner,
+		VideoRepo:       videoRepo,
+		StorageSvc:      storageSvc,
+		RetentionSvc:    retentionSvc,
+		AudioSvc:        audioSvc,
+		HealthSvc:       healthSvc,
+		SettingsSvc:     settingsSvc,
+		PreviewSvc:      previewSvc,
+		ExternalRTSPSvc: externalRTSPSvc,
 	})
 
 	// HTTP-сервер

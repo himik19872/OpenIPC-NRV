@@ -12,6 +12,7 @@ import RecordingsPage from './pages/RecordingsPage'
 import RecognitionPage from './pages/RecognitionPage'
 import ACSPage from './pages/ACSPage'
 import SettingsPage from './pages/SettingsPage'
+import ExternalAccessPage from './pages/ExternalAccessPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth()
@@ -42,6 +43,7 @@ export default function App() {
                 <Route path="/recordings" element={<RecordingsPage />} />
                 <Route path="/recognition" element={<RecognitionPage />} />
                 <Route path="/acs" element={<ACSPage />} />
+                <Route path="/external-access" element={<ExternalAccessPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </Layout>

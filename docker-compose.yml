@@ -36,11 +36,31 @@ services:
     restart: unless-stopped
     volumes:
       - ./mediamtx.yml:/mediamtx.yml
+    environment:
+      # Учётные данные для внешнего RTSP-доступа (порт 9784).
+      # Подставляются в mediamtx.yml при старте.
+      MTX_EXTERNAL_USER: ${MTX_EXTERNAL_USER:-viewer}
+      MTX_EXTERNAL_PASS: ${MTX_EXTERNAL_PASS:-viewer}
     ports:
       - "8554:8554"   # RTSP
       - "8889:8889"   # WebRTC
       - "8888:8888"   # HLS
       - "9997:9997"   # API управления
+
+  # RTSP-прокси для внешних систем на отдельном порту.
+  #
+  # MediaMTX поддерживает только один RTSP-порт, а внешним клиентам
+  # нужен предсказуемый адрес из документации. nginx слушает 9784 и
+  # передаёт поток на RTSP-порт MediaMTX, не разбирая протокол.
+  rtsp-proxy:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./rtsp-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "9784:9784"
+    depends_on:
+      - mediamtx
 
   nats:
     image: nats:latest
@@ -73,6 +93,11 @@ services:
       MINIO_BUCKET: "nvr-recordings"
       NATS_URL: "nats://localhost:4222"
       MEDIAMTX_HOST: "localhost:8888"
+      # Учётные данные внешнего RTSP-доступа: страница настроек
+      # показывает их оператору для настройки сторонних систем.
+      # Должны совпадать со значениями в mediamtx.yml.
+      MTX_EXTERNAL_USER: ${MTX_EXTERNAL_USER:-viewer}
+      MTX_EXTERNAL_PASS: ${MTX_EXTERNAL_PASS:-viewer}
     volumes:
       # Локальное хранилище снимков и записей (режим "local" в настройках сервера).
       # Без этого тома файлы писались бы внутрь контейнера и терялись при

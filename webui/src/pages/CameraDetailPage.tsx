@@ -8,9 +8,10 @@ import EditCameraModal from '../components/EditCameraModal'
 import PTZPanel from '../components/PTZPanel'
 import DetectionSettingsPanel from '../components/DetectionSettingsPanel'
 import AudioSettingsPanel from '../components/AudioSettingsPanel'
+import CameraSettingsPanel from '../components/CameraSettingsPanel'
 import {
   ArrowLeft, RefreshCw, Wifi, WifiOff, Radio, Info,
-  Eye, Settings, AlertTriangle, Pencil, RotateCw, Power, Loader2, Crosshair, Volume2,
+  Eye, Settings, AlertTriangle, Pencil, RotateCw, Power, Loader2, Crosshair, Volume2, Sliders,
 } from 'lucide-react'
 
 /** URL снимка события. Токен в query: <img> не передаёт заголовок Authorization. */
@@ -23,7 +24,7 @@ export default function CameraDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const toast = useToast()
-  const [tab, setTab] = useState<'live' | 'events' | 'detection' | 'audio'>('live')
+  const [tab, setTab] = useState<'live' | 'events' | 'detection' | 'audio' | 'settings'>('live')
   const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null)
   const [showEdit, setShowEdit] = useState(false)
   // Какой поток показываем в плеере: основной или дополнительный.
@@ -90,19 +91,16 @@ export default function CameraDetailPage() {
       setBusy(null)
     }
   }
-
   // Перезагрузка камеры. Устройство уходит в reboot и недоступно ~1 минуту.
+  // Команда идёт через API прошивки, а не по SSH: не нужны root-пароль
+  // и доступ к shell камеры.
   const handleReboot = async () => {
     if (!confirm('Перезагрузить камеру? Она будет недоступна около минуты.')) return
     setBusy('reboot')
     try {
-      const res = await camerasAPI.reboot(id!)
-      if (res.data.success) {
-        toast.success('Команда перезагрузки отправлена')
-        setTimeout(() => { loadStream(); refetch() }, 15000)
-      } else {
-        toast.error(res.data.error || 'Не удалось перезагрузить камеру')
-      }
+      await camerasAPI.restartCamera(id!)
+      toast.success('Команда перезагрузки отправлена')
+      setTimeout(() => { loadStream(); refetch() }, 45000)
     } catch (e: any) {
       toast.error(e?.response?.data?.error || 'Ошибка перезагрузки')
     } finally {
@@ -246,6 +244,13 @@ export default function CameraDetailPage() {
                 <Volume2 size={14} />
                 Звук
               </button>
+              <button
+                className={`btn ${tab === 'settings' ? 'btn-primary' : 'btn-outline'} btn-sm`}
+                onClick={() => setTab('settings')}
+              >
+                <Sliders size={14} />
+                Настройки
+              </button>
             </div>
 
             {tab === 'live' && (
@@ -326,6 +331,8 @@ export default function CameraDetailPage() {
             )}
 
             {tab === 'audio' && <AudioSettingsPanel cameraId={camera.id} />}
+
+            {tab === 'settings' && <CameraSettingsPanel cameraId={camera.id} />}
           </div>
         </div>
 
@@ -375,14 +382,14 @@ export default function CameraDetailPage() {
             </div>
           </div>
 
-          {/* Управление камерой по SSH */}
+          {/* Управление камерой через API прошивки */}
           <div className="card" style={{ marginTop: 16 }}>
             <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 15 }}>
               <Power size={18} style={{ color: 'var(--warning)' }} />
               Управление камерой
             </h3>
             <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-              Команды выполняются по SSH ({((camera.settings?.username as string) || 'root')}@{camera.ip || '—'}).
+              Команды отправляются по HTTP API прошивки ({camera.ip || '—'}). SSH не требуется.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button
@@ -405,7 +412,7 @@ export default function CameraDetailPage() {
             </div>
             {!camera.ip && (
               <p style={{ fontSize: 11, color: 'var(--warning)', marginTop: 8 }}>
-                Нужен IP-адрес камеры для SSH-команд.
+                Нужен IP-адрес камеры для отправки команд.
               </p>
             )}
           </div>

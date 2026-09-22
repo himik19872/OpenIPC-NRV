@@ -1,0 +1,238 @@
+import { useEffect, useState } from 'react'
+import { acsAPI, ACSController, ACSCaptureEvent, camerasAPI, Camera } from '../api/client'
+import { Save, X } from 'lucide-react'
+
+// Редактирование параметров контроллера СКУД.
+//
+// Пароль не показывается и не подставляется в поле: сервер его не отдаёт.
+// Пустое поле означает «оставить прежний пароль» — иначе сохранение имени
+// без правки пароля затирало бы рабочие учётные данные.
+
+interface Props {
+  controller: ACSController
+  onClose: () => void
+  onSaved: () => void
+}
+
+export function EditControllerModal({ controller, onClose, onSaved }: Props) {
+  const [form, setForm] = useState({
+    name: controller.name,
+    ip: controller.ip,
+    port: controller.port,
+    login: '',
+    password: '',
+    camera_id: controller.camera_id || '',
+    capture_mode: controller.capture_mode || 'off',
+    clip_seconds: controller.clip_seconds || 5,
+  })
+  const [captureEvents, setCaptureEvents] = useState<string[]>(controller.capture_events || [])
+  const [events, setEvents] = useState<ACSCaptureEvent[]>([])
+  const [cameras, setCameras] = useState<Camera[]>([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [ok, setOk] = useState('')
+
+  useEffect(() => {
+    // Перечень событий берём с сервера, чтобы не дублировать его в UI:
+    // при добавлении нового типа события он появится здесь сам.
+    acsAPI.captureEvents()
+      .then((r: { data: ACSCaptureEvent[] }) => setEvents(r.data || []))
+      .catch(() => { /* список не критичен для сохранения */ })
+
+    camerasAPI.list()
+      .then((r: { data: Camera[] }) => setCameras(r.data || []))
+      .catch(() => { /* без списка камер останется только текущая привязка */ })
+  }, [])
+
+  const toggleEvent = (value: string) => {
+    setCaptureEvents((prev) =>
+      prev.includes(value) ? prev.filter((e) => e !== value) : [...prev, value]
+    )
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+    setError('')
+    setOk('')
+    try {
+      await acsAPI.updateController(controller.id, {
+        name: form.name,
+        ip: form.ip,
+        port: form.port,
+        // Пустые значения означают «не менять учётные данные».
+        login: form.login,
+        password: form.password,
+        camera_id: form.camera_id,
+        capture_mode: form.capture_mode,
+        capture_events: captureEvents,
+        clip_seconds: form.clip_seconds,
+      })
+      setOk('Сохранено')
+      onSaved()
+    } catch (e: any) {
+      setError(e?.response?.data?.error || 'Не удалось сохранить контроллер')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Без камеры снимать нечего, поэтому настройки съёмки не показываем.
+  const hasCamera = form.camera_id !== ''
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal"
+        style={{ maxWidth: 620, maxHeight: '90vh', overflow: 'auto' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ marginBottom: 4 }}>Параметры контроллера</h2>
+          <button className="btn btn-outline btn-sm" onClick={onClose}><X size={16} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0 }}>
+          Производитель: <strong>{controller.vendor}</strong> — изменить нельзя
+        </p>
+
+        {error && (
+          <div className="card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--danger)' }}>
+            <div style={{ fontSize: 13, color: 'var(--danger)' }}>{error}</div>
+          </div>
+        )}
+        {ok && (
+          <div className="card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--success)' }}>
+            <div style={{ fontSize: 13 }}>{ok}</div>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <label>Название</label>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+
+          <label>IP-адрес</label>
+          <input
+            value={form.ip}
+            onChange={(e) => setForm({ ...form, ip: e.target.value })}
+            placeholder="192.168.1.100"
+            required
+          />
+
+          <label>Порт</label>
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={form.port}
+            onChange={(e) => setForm({ ...form, port: +e.target.value })}
+          />
+
+          <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0 12px', paddingTop: 12 }}>
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+              Учётные данные контроллера. Оставьте пустыми, чтобы не менять.
+            </div>
+          </div>
+
+          <label>Логин</label>
+          <input
+            value={form.login}
+            onChange={(e) => setForm({ ...form, login: e.target.value })}
+            placeholder="без изменений"
+          />
+
+          <label>Новый пароль</label>
+          <input
+            type="password"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            placeholder="без изменений"
+          />
+
+          <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0 12px', paddingTop: 12 }}>
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+              Камера проёма: направьте её на считыватель и дверь, чтобы по
+              событиям доступа было видно, кто и как прошёл.
+            </div>
+          </div>
+
+          <label>Камера</label>
+          <select
+            value={form.camera_id}
+            onChange={(e) => setForm({ ...form, camera_id: e.target.value, capture_mode: e.target.value ? form.capture_mode : 'off' })}
+          >
+            <option value="">Не привязана</option>
+            {cameras.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.status === 'offline' ? ' (офлайн)' : ''}
+              </option>
+            ))}
+          </select>
+
+          {hasCamera && (
+            <>
+              <label>Что сохранять по событию</label>
+              <select
+                value={form.capture_mode}
+                onChange={(e) => setForm({ ...form, capture_mode: e.target.value as any })}
+              >
+                <option value="off">Не снимать</option>
+                <option value="snapshot">Снимок (кадр)</option>
+                <option value="clip">Короткое видео</option>
+              </select>
+
+              {form.capture_mode !== 'off' && (
+                <>
+                  <label>События доступа для съёмки</label>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                    Ничего не отмечено — съёмка на все события.
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {events.map((ev) => (
+                      <label
+                        key={ev.value}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 0, fontWeight: 400 }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={captureEvents.includes(ev.value)}
+                          onChange={() => toggleEvent(ev.value)}
+                          style={{ width: 'auto' }}
+                        />
+                        {ev.label}
+                      </label>
+                    ))}
+                  </div>
+
+                  {form.capture_mode === 'clip' && (
+                    <>
+                      <label>Длительность видео, сек</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={form.clip_seconds}
+                        onChange={(e) => setForm({ ...form, clip_seconds: +e.target.value })}
+                      />
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        Видео нужно, когда важно само действие (проход), — оно
+                        занимает диск. Для фотофиксации достаточно снимка.
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
+            <button type="button" className="btn btn-outline" onClick={onClose}>Закрыть</button>
+            <button type="submit" className="btn btn-primary" disabled={saving}>
+              <Save size={16} />
+              {saving ? 'Сохранение...' : 'Сохранить'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}

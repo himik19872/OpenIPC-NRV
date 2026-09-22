@@ -186,6 +186,13 @@ func (m *CameraStatusMonitor) pruneOrphanPaths(ctx context.Context, paths map[st
 		if strings.HasSuffix(name, "_audio") || strings.HasSuffix(name, "_talk") {
 			continue
 		}
+		// Внешние адреса (cameras/{N}/streaming/{main|sub}) публикует сервис
+		// внешнего доступа, и в списке ожидаемых их нет — там только UUID
+		// камер. Без этой проверки монитор считал бы их сиротами и удалял
+		// каждые 15 секунд, поэтому внешние системы не могли подключиться.
+		if IsExternalRTSVPath(name) {
+			continue
+		}
 
 		log.Info().Str("path", name).Msg("removing orphan MediaMTX path")
 		if err := m.deletePath(ctx, name); err != nil {

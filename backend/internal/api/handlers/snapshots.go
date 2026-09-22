@@ -66,3 +66,48 @@ func (h *SnapshotHandler) Get(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Write(data)
 }
+
+// GetACS отдаёт снимок события СКУД.
+// GET /api/v1/acs/events/{id}/snapshot?jwt=<token>
+//
+// Отдельный метод, а не общий с событиями детекции: снимки лежат в разных
+// таблицах, и объединять их в одном запросе пришлось бы через UNION, что
+// усложнило бы поиск по индексу первичного ключа.
+//
+// Как и для детекции, снимок отдаётся через бэкенд, а не редиректом на
+// presigned-ссылку MinIO: такая ссылка подписана под конкретный Host и при
+// открытии интерфейса по внешнему адресу ведёт на localhost клиента.
+func (h *SnapshotHandler) GetACS(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+
+	var storedPath *string
+	err = h.db.QueryRow(r.Context(),
+		`SELECT snapshot_path FROM acs_events WHERE id = $1`, id).Scan(&storedPath)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+		return
+	}
+	if storedPath == nil || *storedPath == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "snapshot not saved for this event"})
+		return
+	}
+	if h.storage == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage unavailable"})
+		return
+	}
+
+	data, _, err := h.storage.ReadStoredFile(r.Context(), *storedPath)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "snapshot file not found"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Write(data)
+}

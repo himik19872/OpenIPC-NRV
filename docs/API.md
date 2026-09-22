@@ -208,6 +208,102 @@ GET /api/v1/cameras/{id}/snapshot?jwt=<token>
 Возвращает `image/jpeg`. Бэкенд сам определяет подходящий путь для
 производителя камеры, а при неудаче извлекает кадр из HLS-потока через ffmpeg.
 
+### Превью кадрами
+
+```http
+GET /api/v1/cameras/{id}/preview?jwt=<token>&w=480
+```
+
+Возвращает `image/jpeg` — одиночный кадр с камеры. Дешевле видеопотока:
+один HTTP-запрос вместо RTSP-сессии, что важно для парка камер.
+
+| Параметр | Назначение |
+|---|---|
+| `w` | Желаемая ширина кадра. По умолчанию и максимум — 640. Кадр уменьшается на сервере: 4K-камера отдаёт 470 КБ, для плитки в списке достаточно 17 КБ |
+| `jwt` | Токен доступа. Маршрут вне JWT-группы, потому что кадр вставляется тегом `<img>`, который не может передать заголовок `Authorization` |
+
+Пути кадра перебираются с учётом вендора: `/image.jpg` на OpenIPC,
+`/cgi-bin/viewer/video.jpg` на Vivotek. Поддерживается Basic и
+Digest-авторизация. Если HTTP-эндпоинта кадра нет, кадр извлекается
+из видеопотока через ffmpeg.
+
+Ответ может быть отдан из кэша (5 секунд, для кадров из потока — 20).
+Если камера временно не отдаёт кадр, возвращается последний удачный —
+плитка в интерфейсе не мигает ошибкой.
+
+---
+
+## Внешний RTSP-доступ
+
+Выдача потоков сторонним системам. Подробности — в
+[docs/EXTERNAL-RTSP.md](EXTERNAL-RTSP.md).
+
+### Параметры подключения и каналы
+
+```http
+GET /api/v1/rtsp/settings
+```
+
+```json
+{
+  "port": 9784,
+  "username": "viewer",
+  "password": "viewer",
+  "server_ip": "192.168.1.10",
+  "next_channel": 20,
+  "channels": [
+    {
+      "number": 1,
+      "index": 0,
+      "camera_id": "00b31acf-...",
+      "camera_name": "Камера 192.168.1.5",
+      "ip": "192.168.1.5",
+      "status": "online",
+      "main_path": "/cameras/0/streaming/main",
+      "sub_path": "/cameras/0/streaming/sub"
+    }
+  ],
+  "unassigned": [
+    {
+      "camera_id": "822a94fa-...",
+      "camera_name": "Новая камера",
+      "ip": "192.168.1.201",
+      "status": "offline"
+    }
+  ]
+}
+```
+
+| Поле | Назначение |
+|---|---|
+| `number` | Номер канала как его задал оператор (с 1) |
+| `index` | Номер в адресе потока — тот же канал со смещением на минус один |
+| `channels` | Каналы, опубликованные для внешних систем |
+| `unassigned` | Камеры без номера: наружу не отдаются, номер можно задать |
+| `next_channel` | Свободный номер — подсказка для формы назначения |
+
+Готовый адрес собирается из этих полей:
+
+```
+rtsp://{username}:{password}@{server_ip}:{port}{main_path}
+```
+
+### Назначить номер канала
+
+```http
+POST /api/v1/rtsp/channels/{cameraId}
+Content-Type: application/json
+
+{"channel": 20}
+```
+
+Возвращает обновлённый список — тот же формат, что `GET /rtsp/settings`.
+Номер уникален: попытка занять занятый номер вернёт `400` с указанием
+причины.
+
+Номер можно снять, передав `0` в поле `channel_number` при изменении
+камеры — тогда она перестанет публиковаться наружу.
+
 ---
 
 ## PTZ (поворотные камеры)
@@ -273,7 +369,62 @@ POST /api/v1/cameras/{id}/ptz/presets/goto   {"token": "1"}
 
 ## Управление камерой
 
-Команды выполняются по SSH (OpenIPC/Majestic).
+Настройки камеры через HTTP API прошивки (Majestic) — **без SSH**.
+Для камер со старой сборкой без API резервно используется SSH.
+
+### Настройки камеры
+
+```http
+GET   /api/v1/cameras/{id}/settings
+PATCH /api/v1/cameras/{id}/settings
+POST  /api/v1/cameras/{id}/restart
+```
+
+`GET` возвращает текущие настройки и сведения об устройстве:
+
+```json
+{
+  "settings": {
+    "main_fps": 20, "main_bitrate": 4096, "main_size": "1920x1080",
+    "main_codec": "h264", "sub_fps": 15, "sub_bitrate": 1024,
+    "luminance": 52, "contrast": 46, "saturation": 52, "hue": 50,
+    "mirror": false, "flip": false, "anti_flicker": "disabled",
+    "night_mode": {
+      "color_to_gray": true, "ir_cut": "auto",
+      "auto_night_delay": 15, "auto_day_delay": 60
+    },
+    "osd_enabled": true, "osd_template": "openIPC %d.%m.%Y %H:%M:%S",
+    "osd_size": "1", "osd_pos_x": 16, "osd_pos_y": 16,
+    "osd_bg_alpha": 25, "osd_outline": true
+  },
+  "device": {
+    "soc": "gk7205v300", "sensor": "imx335",
+    "firmware": "2.6.09.18-lite", "build": "master+49908b5",
+    "kernel": "4.9.37", "flash": "16 MB nor"
+  }
+}
+```
+
+`PATCH` принимает **только изменяемые поля** — остальные настройки камеры
+не затрагиваются:
+
+```http
+PATCH /api/v1/cameras/{id}/settings
+Content-Type: application/json
+
+{"main_bitrate": 3072, "osd_template": "%H:%M:%S"}
+```
+
+Значения проверяются до записи: камера слабая, и неверный битрейт или
+размер кадра роняет поток. Диапазоны: fps `1–60`, битрейт `64–20000` кбит/с,
+яркость и контраст `0–100`, размер кадра вида `1920x1080`.
+
+`POST /restart` перезапускает камеру через API прошивки. При перезапуске
+камера недоступна около минуты.
+
+### Управление по SSH
+
+Резервный путь для камер без API прошивки:
 
 ```http
 POST /api/v1/cameras/{id}/restart-streamer
@@ -284,8 +435,48 @@ POST /api/v1/cameras/{id}/reboot
 {"command": "restart majestic", "success": true}
 ```
 
-После перезапуска стримера поток поднимается примерно за 20 секунд,
-после перезагрузки камера недоступна около минуты.
+После перезапуска стримера поток поднимается примерно за 20 секунд.
+
+### Здоровье камер
+
+```http
+GET  /api/v1/cameras/health
+GET  /api/v1/cameras/{id}/health
+POST /api/v1/cameras/{id}/health/collect
+```
+
+Показатели собираются раз в минуту из `/metrics` и `/api/v1/sources`
+камер. Проблемные камеры идут первыми:
+
+```json
+[
+  {
+    "camera_id": "8fa94c32-...",
+    "camera_name": "Камера 192.168.1.61",
+    "ip": "192.168.1.61",
+    "supported": true,
+    "online": true,
+    "level": "critical",
+    "issues": ["сильная перегрузка (load 11.4)", "мало памяти (11.3 МБ)"],
+    "load1": 11.4,
+    "mem_available_mb": 11.3,
+    "isp_fps": 24,
+    "rtsp_clients": 3,
+    "night_enabled": true,
+    "uptime_sec": 3714,
+    "kernel": "4.9.84",
+    "platform": "ssc337-sc2336",
+    "collected_at": "2026-09-22T18:12:04Z"
+  }
+]
+```
+
+Уровни: `ok`, `warning`, `critical`, `unknown`. Пороги: `load1 ≥ 4` —
+критично, `≥ 1.5` — внимание; свободная память `< 5 МБ` — критично,
+`< 12 МБ` — внимание; fps сенсора ниже половины fps потока — внимание.
+
+`POST /health/collect` запускает опрос немедленно, не дожидаясь
+следующего цикла.
 
 ---
 

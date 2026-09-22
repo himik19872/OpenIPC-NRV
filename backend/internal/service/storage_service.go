@@ -18,7 +18,7 @@ import (
 // StorageService сохраняет снимки и записи в выбранное хранилище.
 // Поддерживает MinIO/S3 и локальный диск — выбор хранится в server_settings.
 type StorageService struct {
-	settings *postgres.DetectionSettingsRepo
+	settings  *postgres.DetectionSettingsRepo
 	videoRepo *miniorepo.VideoRepo
 }
 
