@@ -75,3 +75,18 @@ firmware/skud-esp32-p4/.vscode/
 # Дампы схем и парсера документации
 schema_dump.txt
 schematic.txt
+
+# --- Мобильное приложение (React Native / Android) ---
+mobile/node_modules/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/app/debug/
+mobile/android/app/release/
+mobile/.expo/
+mobile/ios/Pods/
+mobile/ios/build/
+# Ключи подписи: приватный ключ не должен попадать в репозиторий.
+*.keystore
+*.jks
