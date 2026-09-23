@@ -19,6 +19,11 @@ export interface ParsedAddress {
 /**
  * Приводит введённый адрес к базовому виду.
  *
+ * Адрес разбирается вручную, без класса URL. В браузере он есть, но в
+ * Hermes — движке JavaScript в React Native — реализован частично и падает
+ * с ошибкой «URL.hostname is not implemented». Регулярные выражения
+ * работают везде одинаково.
+ *
  * Правила:
  * - если схема не указана, подставляется http (у большинства серверов
  *   видеонаблюдения нет сертификата, а самоподписанный вызовет ошибку);
@@ -36,45 +41,82 @@ export function parseAddress(input: string): ParsedAddress | null {
   // двух адресов. Лучше отклонить, чем молча получить нерабочую ссылку.
   if (/\s/.test(trimmed)) return null;
 
-  let withScheme = trimmed;
-  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
-  if (!hasScheme) {
-    withScheme = `http://${trimmed}`;
-  }
+  // Схема: http:// или https://. Всё остальное (в том числе ftp://) не
+  // поддерживается: сервер отвечает по HTTP.
+  const schemeMatch = /^(https?):\/\//i.exec(trimmed);
+  const scheme = schemeMatch ? schemeMatch[1].toLowerCase() : 'http';
 
-  let url: URL;
-  try {
-    url = new URL(withScheme);
-  } catch {
-    return null;
-  }
+  // Остаток адреса после схемы: «хост:порт/путь?запрос».
+  let rest = schemeMatch ? trimmed.slice(schemeMatch[0].length) : trimmed;
 
-  const host = url.hostname;
-  if (!host) return null;
-
-  // Проверяем, что хост похож на адрес или доменное имя. Отсекаем случаи
-  // вроде «http://-» или «http://..», которые URL пропускает, а сеть — нет.
-  const looksLikeIPv6 = host.includes(':');
-  const looksLikeIPv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-  const looksLikeHostname = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(host);
-  if (!looksLikeIPv6 && !looksLikeIPv4 && !looksLikeHostname) return null;
-
-  // Явно указанный порт уважаем, иначе подставляем порт сервера NVR.
-  const port = url.port ? Number(url.port) : DEFAULT_PORT;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  // Путь и параметры отбрасываем: пользователь вводит адрес сервера, а
+  // пути API приложение дописывает само.
+  rest = rest.split(/[/?#]/, 1)[0];
+  if (!rest) return null;
 
   /**
-   * Проверяем, нужно ли показывать порт.
+   * Отделяем порт от хоста.
    *
-   * Схему в адрес дописывает это приложение (пользователь её не вводил),
-   * но порт 80 он указать мог. Поэтому смотрим не на итоговую схему, а на
-   * исходный ввод: если порт написан явно — показываем.
+   * Случаи: `192.168.1.10`, `192.168.1.10:8080`, `nvr.local:9000` и
+   * IPv6 в квадратных скобках — `[::1]:8080`.
    */
-  const hostHasPort = /:\d+(\/|$)/.test(trimmed) || /\]\s*:\d+/.test(trimmed);
-  const showPort = hostHasPort && port !== 80 && port !== 443;
+  let hostPart: string;
+  let portPart: string | null = null;
 
-  const baseUrl = `${url.protocol}//${url.hostname}${port === 80 || port === 443 ? '' : `:${port}`}`;
-  const display = showPort ? `${host}:${port}` : host;
+  const ipv6Match = /^\[([^\]]+)\](?::(\d+))?$/.exec(rest);
+  if (ipv6Match) {
+    hostPart = ipv6Match[1];
+    portPart = ipv6Match[2] ?? null;
+  } else {
+    const lastColon = rest.lastIndexOf(':');
+    // Двоеточие есть и после него только цифры — это порт. Иначе двоеточие
+    // принадлежит адресу IPv6, записанному без скобок.
+    if (lastColon > 0 && /^\d+$/.test(rest.slice(lastColon + 1))) {
+      hostPart = rest.slice(0, lastColon);
+      portPart = rest.slice(lastColon + 1);
+    } else {
+      hostPart = rest;
+    }
+  }
+
+  if (!hostPart) return null;
+
+  // Проверяем, что хост похож на адрес или доменное имя. Отсекаем случаи
+  // вроде «http://-» или «http://..», которые формально разбираются, а в
+  // сети не существуют.
+  const looksLikeIPv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostPart);
+  const looksLikeIPv6 = hostPart.includes(':');
+  const looksLikeHostname =
+    /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(
+      hostPart,
+    );
+  if (!looksLikeIPv4 && !looksLikeIPv6 && !looksLikeHostname) return null;
+
+  // Для IPv4 проверяем диапазон: 999.1.1.1 формально проходит регулярное
+  // выражение, но адресом не является.
+  if (looksLikeIPv4) {
+    const parts = hostPart.split('.').map(Number);
+    if (parts.some((part) => part > 255)) return null;
+  }
+
+  // Явно указанный порт уважаем. Если порта нет, берём стандартный для
+  // схемы: для https это 443 (пользователь написал схему осознанно), для
+  // http — порт сервера NVR.
+  const defaultPortForScheme = scheme === 'https' ? 443 : DEFAULT_PORT;
+  const port = portPart === null ? defaultPortForScheme : Number(portPart);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+
+  // Порт не пишем в адрес, если он стандартный для схемы: так ссылка
+  // выглядит привычнее, а браузер и сервер понимают её одинаково.
+  const isDefaultPort =
+    (scheme === 'http' && port === 80) || (scheme === 'https' && port === 443);
+  const hostForUrl = looksLikeIPv6 ? `[${hostPart}]` : hostPart;
+  const baseUrl = `${scheme}://${hostForUrl}${isDefaultPort ? '' : `:${port}`}`;
+
+  // В подписи для интерфейса порт показываем, если он написан явно и не
+  // стандартный: «192.168.1.10:8080» понятнее, чем просто адрес.
+  const showPort = portPart !== null && !isDefaultPort;
+  const display = showPort ? `${hostForUrl}:${port}` : hostForUrl;
 
   return { baseUrl, display };
 }
@@ -93,17 +135,20 @@ export function joinUrl(baseUrl: string, path?: string): string {
   // Абсолютная ссылка. Доверять ей нельзя, если она ведёт на localhost:
   // это адрес из конфигурации сервера, а не что-то доступное с телефона.
   if (/^https?:\/\//i.test(path)) {
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(path)) {
-      // Подменяем только хост и порт, путь оставляем: он принадлежит API.
-      try {
-        const parsed = new URL(path);
-        // Порт сервера NVR может отличаться от порта из ссылки, поэтому
-        // берём его из базового адреса, а не из исходной строки.
-        const base = new URL(baseUrl);
-        return `${base.protocol}//${base.host}${parsed.pathname}${parsed.search}`;
-      } catch {
-        return path;
+    if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(path)) {
+      /*
+       * Подменяем хост и порт на выбранный сервер, путь оставляем: он
+       * принадлежит API. Разбираем строкой, а не классом URL — в Hermes
+       * он не реализован.
+       */
+      const withoutScheme = path.replace(/^https?:\/\//i, '');
+      const slashIndex = withoutScheme.search(/[/?#]/);
+      if (slashIndex < 0) {
+        // Путь отсутствует: остаётся только адрес сервера.
+        return baseUrl.replace(/\/+$/, '');
       }
+      const rest = withoutScheme.slice(slashIndex);
+      return `${baseUrl.replace(/\/+$/, '')}${rest}`;
     }
     return path;
   }
