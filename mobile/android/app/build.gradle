@@ -21,7 +21,15 @@ react {
     //   The list of variants to that are debuggable. For those we're going to
     //   skip the bundling of the JS bundle and the assets. By default is just 'debug'.
     //   If you add flavors like lite, prod, etc. you'll have to list your debuggableVariants.
-    // debuggableVariants = ["liteDebug", "prodDebug"]
+    //
+    //   Пустой список означает, что JS-бандл встраивается и в debug-сборку.
+    //   Так сделано намеренно: APK устанавливается на телефон и должен
+    //   работать без запущенного Metro, иначе приложение падает с ошибкой
+    //   «Unable to load script».
+    //
+    //   Для разработки с hot reload верните поведение по умолчанию:
+    //     debuggableVariants = ["debug"]
+    debuggableVariants = []
 
     /* Bundling */
     //   A list containing the node command and its flags. Default is just 'node'.
@@ -84,6 +92,21 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+
+        /*
+         * Ограничиваем список архитектур в APK.
+         *
+         * Свойство reactNativeArchitectures из gradle.properties управляет
+         * только сборкой C++ из исходников. Готовые библиотеки (.so) из
+         * зависимостей попадают в APK для всех архитектур сразу, из-за чего
+         * файл вырастает до 155 МБ вместо 40 МБ.
+         *
+         * arm64-v8a — архитектура всех современных телефонов Android.
+         * Для эмулятора добавьте x86_64.
+         */
+        ndk {
+            abiFilters "arm64-v8a"
+        }
     }
     signingConfigs {
         debug {

@@ -119,17 +119,67 @@ cd android
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew assembleDebug
 ```
 
-Готовый файл: `mobile/android/app/build/outputs/apk/debug/app-debug.apk`.
+Готовый файл: `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
+(около 51 МБ).
 
-Debug-сборка получается большой (~155 МБ), потому что содержит библиотеки
-для всех архитектур процессора. Для установки на конкретный телефон
-соберите только нужную архитектуру:
+### Почему debug-APK работает без Metro
 
-```bash
-./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a
+Обычно debug-сборка React Native берёт JS-скрипт из Metro по сети. Если
+установить её на телефон без запущенного Metro, приложение падает с ошибкой:
+
+```
+Unable to load script. Make sure you're either running Metro
+(run 'npx react-native start') or that your bundle
+'index.android.bundle' is packaged correctly for release.
 ```
 
-Такой APK будет примерно в четыре раза меньше.
+В этом проекте поведение изменено: в `android/app/build.gradle` список
+debuggable-вариантов оставлен пустым
+
+```groovy
+react {
+    debuggableVariants = []
+}
+```
+
+Плагин React Native создаёт задачу сборки бандла только для вариантов,
+которых нет в этом списке. Пустой список означает, что бандл собирается и
+для debug, и `assets/index.android.bundle` попадает в APK. Ошибка не
+возникает.
+
+> **Для разработки с hot reload** верните строку `debuggableVariants = ["debug"]`
+> и запускайте `npm start` плюс `adb reverse tcp:8081 tcp:8081`.
+
+### Размер APK
+
+| Сборка | Размер | Архитектуры |
+|---|---|---|
+| debug | ~51 МБ | arm64-v8a |
+| release | ~24 МБ | arm64-v8a |
+
+В APK только `arm64-v8a` — архитектура всех современных телефонов Android.
+Полный набор из четырёх архитектур даёт 155 МБ (debug) и 66 МБ (release).
+
+Ограничение задано в `android/app/build.gradle`:
+
+```groovy
+ndk {
+    abiFilters "arm64-v8a"
+}
+```
+
+> Свойство `reactNativeArchitectures` в `gradle.properties` **не помогает**:
+> оно управляет только сборкой C++ из исходников. Готовые библиотеки `.so`
+> из зависимостей попадают в APK для всех архитектур, и отсечь их можно
+> только через `abiFilters`.
+
+Для запуска на эмуляторе добавьте `x86_64`:
+
+```groovy
+ndk {
+    abiFilters "arm64-v8a", "x86_64"
+}
+```
 
 ### Установка на телефон
 
@@ -145,8 +195,10 @@ adb devices
 4. Установите приложение:
 
 ```bash
-adb install mobile/android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Флаг `-r` переустанавливает поверх предыдущей версии, сохраняя настройки.
 
 Либо просто перенесите APK на телефон и откройте его файловым менеджером —
 потребуется разрешить установку из неизвестных источников.
@@ -164,6 +216,9 @@ cd android
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew installDebug
 adb reverse tcp:8081 tcp:8081      # Metro доступен телефону
 ```
+
+Не забудьте про `debuggableVariants = ["debug"]` — иначе приложение
+использует встроенный бандл и правки на лету не подхватываются.
 
 ## Структура
 
@@ -214,6 +269,16 @@ npx eslint . --ext .ts,.tsx          # стиль
 трёх кадров: камеры OpenIPC отказывают при большом числе параллельных
 запросов, и в списке появлялись бы пустые плитки. Место освобождается только
 после получения картинки или ошибки — иначе очередь не ограничивает нагрузку.
+
+**JS-бандл встраивается и в debug-сборку.** По умолчанию debug-сборка
+React Native берёт скрипт из Metro по сети и падает с ошибкой «Unable to
+load script», если Metro не запущен. Список `debuggableVariants` оставлен
+пустым, поэтому бандл собирается для всех вариантов и APK работает на
+телефоне сам по себе. Подробности — в разделе сборки.
+
+**В APK только arm64-v8a.** Отсекается через `abiFilters`: свойство
+`reactNativeArchitectures` управляет лишь сборкой C++ из исходников и на
+упаковку готовых `.so` не влияет.
 
 **Навигация собрана вручную.** Экранов пять, переходы линейные, поэтому
 библиотека навигации не нужна: меньше зависимостей и предсказуемое поведение
