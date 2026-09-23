@@ -332,8 +332,27 @@ func (r *RecorderService) CollectClip(cameraID uuid.UUID, eventTime time.Time,
 	key := cameraID.String()
 	dir := filepath.Join(r.BufferDir, key)
 
-	from := eventTime.Add(-time.Duration(preSec) * time.Second)
+	wantFrom := eventTime.Add(-time.Duration(preSec) * time.Second)
 	to := eventTime.Add(time.Duration(postSec) * time.Second)
+
+	// Проверяем, что пребуфер действительно набран.
+	//
+	// Раньше клип собирался всегда и молча: если запись началась уже ПОСЛЕ
+	// события (а HandleEvent запускает её именно в этот момент), сегментов
+	// до события просто не существовало, и в клип попадало только время
+	// после него — сам объект оставался за кадром.
+	//
+	// Теперь честно говорим, что собрать нечего. Пропуск клипа лучше, чем
+	// клип без того, ради чего он записан.
+	oldest, err := r.oldestSegmentTime(dir)
+	if err != nil {
+		return "", err
+	}
+	if !oldest.IsZero() && oldest.After(wantFrom) {
+		return "", fmt.Errorf(
+			"пребуфер не набран: запись идёт с %s, а событие было в %s (нужно %d с)",
+			oldest.Format("15:04:05"), eventTime.Format("15:04:05"), preSec)
+	}
 
 	// Даём ffmpeg время записать сегменты «после события»
 	wait := time.Until(to)
@@ -341,7 +360,7 @@ func (r *RecorderService) CollectClip(cameraID uuid.UUID, eventTime time.Time,
 		time.Sleep(wait)
 	}
 
-	segments, err := r.segmentsInRange(dir, from, to)
+	segments, err := r.segmentsInRange(dir, wantFrom, to)
 	if err != nil {
 		return "", err
 	}
@@ -354,6 +373,57 @@ func (r *RecorderService) CollectClip(cameraID uuid.UUID, eventTime time.Time,
 		return "", err
 	}
 	return out, nil
+}
+
+// SegmentCoverage сообщает, какой интервал времени покрыт сегментами записи.
+//
+// Нужно, чтобы понять, попадёт ли событие в клип: если самый старый сегмент
+// записан позже события, пребуфер не набран и объекта в клипе не будет.
+// Возвращает время начала самого старого сегмента и конца самого нового.
+func (r *RecorderService) SegmentCoverage(cameraID uuid.UUID) (oldest, newest time.Time) {
+	dir := filepath.Join(r.BufferDir, cameraID.String())
+	oldest, _ = r.oldestSegmentTime(dir)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return oldest, time.Time{}
+	}
+	for _, entry := range entries {
+		ts, ok := segmentTime(entry.Name())
+		if !ok {
+			continue
+		}
+		if ts.After(newest) {
+			newest = ts
+		}
+	}
+	return oldest, newest
+}
+
+// oldestSegmentTime возвращает время самого старого сегмента в каталоге.
+//
+// Пустое время означает, что сегментов ещё нет (запись только началась).
+// Ошибка означает, что каталог не читается вовсе.
+func (r *RecorderService) oldestSegmentTime(dir string) (time.Time, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+
+	var oldest time.Time
+	for _, entry := range entries {
+		ts, ok := segmentTime(entry.Name())
+		if !ok {
+			continue
+		}
+		if oldest.IsZero() || ts.Before(oldest) {
+			oldest = ts
+		}
+	}
+	return oldest, nil
 }
 
 // segmentsInRange выбирает файлы сегментов, попадающие в интервал.
@@ -371,12 +441,8 @@ func (r *RecorderService) segmentsInRange(dir string, from, to time.Time) ([]str
 
 	var picked []string
 	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, "seg_") || !strings.HasSuffix(name, ".mp4") {
-			continue
-		}
-		ts, err := time.ParseInLocation("20060102_150405", strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".mp4"), time.Local)
-		if err != nil {
+		ts, ok := segmentTime(e.Name())
+		if !ok {
 			continue
 		}
 		// Сегмент покрывает [ts, ts+SegmentSec]: берём пересекающиеся с интервалом
@@ -392,7 +458,7 @@ func (r *RecorderService) segmentsInRange(dir string, from, to time.Time) ([]str
 		if segEnd.After(time.Now().Add(-2 * time.Second)) {
 			continue
 		}
-		full := filepath.Join(dir, name)
+		full := filepath.Join(dir, e.Name())
 		// Дополнительная проверка на случай, если запись встала: файл мог
 		// остаться без индекса, и тогда он сломает склейку.
 		if !hasMoovAtom(full) {
@@ -403,6 +469,22 @@ func (r *RecorderService) segmentsInRange(dir string, from, to time.Time) ([]str
 	}
 	// os.ReadDir сортирует по имени, а имя содержит время — порядок уже верный
 	return picked, nil
+}
+
+// segmentTime разбирает время начала сегмента из его имени.
+//
+// Имена задаёт ffmpeg по шаблону strftime: seg_20060102_150405.mp4.
+// Возвращает false для чужих файлов — например, собранных клипов (clip_...).
+func segmentTime(name string) (time.Time, bool) {
+	if !strings.HasPrefix(name, "seg_") || !strings.HasSuffix(name, ".mp4") {
+		return time.Time{}, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".mp4")
+	ts, err := time.ParseInLocation("20060102_150405", raw, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
 }
 
 // hasMoovAtom сообщает, содержит ли MP4 индекс (moov atom).

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Save, Loader2, Video, Camera as CameraIcon, AlertCircle, Crosshair,
-  CheckCircle2, Minus, Trash2,
+  CheckCircle2, Minus, Trash2, SlidersHorizontal, ScanFace,
 } from 'lucide-react'
 import {
   detectionAPI, OBJECT_CLASSES, DETECT_TYPES, PLATE_PATTERNS, detectPatternKey,
@@ -36,6 +36,13 @@ function toForm(s: DetectionSettings) {
     plate_max_length: s.plate_max_length ?? 12,
     plate_pattern: s.plate_pattern || '',
     plate_min_confidence: s.plate_min_confidence ?? 0.3,
+    // Фильтры точности: отсекают ложные срабатывания.
+    min_object_area: s.min_object_area ?? 0.004,
+    max_object_area: s.max_object_area ?? 0.9,
+    max_aspect_ratio: s.max_aspect_ratio ?? 5.0,
+    static_seconds: s.static_seconds ?? 0,
+    face_min_confidence: s.face_min_confidence ?? 0.5,
+    face_requires_person: s.face_requires_person ?? true,
   }
 }
 
@@ -446,6 +453,7 @@ export default function DetectionSettingsPanel({ cameraId, snapshotUrl }: Props)
       <h4 style={{ fontSize: 14, margin: '0 0 4px' }}>Порог уверенности: {(form.min_confidence * 100).toFixed(0)}%</h4>
       <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 6px' }}>
         Объекты с уверенностью ниже порога игнорируются. Меньше — больше находок, но и больше ложных.
+        На реальных камерах большинство объектов имеет уверенность 40–60%: при пороге выше 60% находок почти не будет.
       </p>
       <input
         type="range" min="0.1" max="0.9" step="0.05"
@@ -453,6 +461,99 @@ export default function DetectionSettingsPanel({ cameraId, snapshotUrl }: Props)
         onChange={(e) => patch('min_confidence', parseFloat(e.target.value))}
         style={{ width: '100%', marginBottom: 18, accentColor: 'var(--accent)' }}
       />
+
+      {/* Фильтры точности: отсекают ложные срабатывания по форме объекта */}
+      <h4 style={{ fontSize: 14, margin: '0 0 4px' }}>
+        <SlidersHorizontal size={14} style={{ verticalAlign: -2, marginRight: 4 }} />
+        Фильтры точности
+      </h4>
+      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
+        Отсекают ложные рамки: мелкий шум, блики, тени и предметы обстановки.
+        Помогают уменьшить число срабатываний, не поднимая порог уверенности.
+      </p>
+
+      <h4 style={{ fontSize: 13, margin: '0 0 4px', fontWeight: 500 }}>
+        Минимальный размер объекта: {(form.min_object_area * 100).toFixed(2)}% кадра
+      </h4>
+      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 6px' }}>
+        Рамки меньше этого размера игнорируются. Подбирайте по самой дальней точке,
+        где нужно замечать человека: замер на камерах показал, что человек вдали
+        занимает около 1,7% кадра, а шум — меньше 0,3%.
+      </p>
+      <input
+        type="range" min="0" max="0.05" step="0.001"
+        value={form.min_object_area}
+        onChange={(e) => patch('min_object_area', parseFloat(e.target.value))}
+        style={{ width: '100%', marginBottom: 14, accentColor: 'var(--accent)' }}
+      />
+
+      <h4 style={{ fontSize: 13, margin: '0 0 4px', fontWeight: 500 }}>
+        Максимальное отношение сторон: {form.max_aspect_ratio === 0 ? 'выключено' : `${form.max_aspect_ratio.toFixed(1)}:1`}
+      </h4>
+      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 6px' }}>
+        Вытянутые рамки — обычно тени, столбы и отражения. Человек и машина
+        укладываются в 5:1. Значение 0 выключает проверку.
+      </p>
+      <input
+        type="range" min="0" max="15" step="0.5"
+        value={form.max_aspect_ratio}
+        onChange={(e) => patch('max_aspect_ratio', parseFloat(e.target.value))}
+        style={{ width: '100%', marginBottom: 14, accentColor: 'var(--accent)' }}
+      />
+
+      <h4 style={{ fontSize: 13, margin: '0 0 4px', fontWeight: 500 }}>
+        Неподвижные объекты: {form.static_seconds === 0 ? 'не отсекать' : `через ${form.static_seconds} с`}
+      </h4>
+      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 6px' }}>
+        Объект, который стоит на месте дольше указанного времени, перестаёт
+        считаться целью. Убирает повторные события по стулу, тени или коробке.
+        0 — не отсекать.
+      </p>
+      <input
+        type="range" min="0" max="300" step="10"
+        value={form.static_seconds}
+        onChange={(e) => patch('static_seconds', parseFloat(e.target.value))}
+        style={{ width: '100%', marginBottom: 18, accentColor: 'var(--accent)' }}
+      />
+
+      {/* Условия запуска распознавания лиц */}
+      {form.detect_types.includes('face') && (
+        <>
+          <h4 style={{ fontSize: 14, margin: '0 0 8px' }}>
+            <ScanFace size={14} style={{ verticalAlign: -2, marginRight: 4 }} />
+            Распознавание лиц
+          </h4>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={form.face_requires_person}
+              onChange={(e) => patch('face_requires_person', e.target.checked)}
+              style={{ accentColor: 'var(--accent)' }}
+            />
+            <span style={{ fontSize: 13 }}>Искать лица только при человеке в кадре</span>
+          </label>
+          <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 12px' }}>
+            Без этой проверки лицо ищется на каждом кадре, и модель находит его
+            в текстурах и отражениях. На реальной системе это давало в пять раз
+            больше событий по лицам, чем по людям.
+          </p>
+
+          {form.face_requires_person && (
+            <>
+              <h4 style={{ fontSize: 13, margin: '0 0 4px', fontWeight: 500 }}>
+                Уверенность человека для поиска лиц: {(form.face_min_confidence * 100).toFixed(0)}%
+              </h4>
+              <input
+                type="range" min="0.1" max="0.9" step="0.05"
+                value={form.face_min_confidence}
+                onChange={(e) => patch('face_min_confidence', parseFloat(e.target.value))}
+                style={{ width: '100%', marginBottom: 18, accentColor: 'var(--accent)' }}
+              />
+            </>
+          )}
+        </>
+      )}
 
       {/* Что делать с детекцией */}
       <h4 style={{ fontSize: 14, margin: '0 0 8px' }}>

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -242,6 +243,15 @@ func (m *RecordingManager) collectAndSave(ctx context.Context, cameraID uuid.UUI
 
 	clip, err := m.recorder.CollectClip(cameraID, eventTime, pre, post)
 	if err != nil {
+		// Отдельно выделяем нехватку пребуфера: это не сбой, а ожидаемое
+		// следствие того, что запись началась позже события. Оператору
+		// полезно знать, что клипа нет именно поэтому.
+		if strings.Contains(err.Error(), "пребуфер не набран") {
+			log.Info().Str("camera_id", cameraID.String()[:8]).
+				Str("trigger", triggerDetail).
+				Msgf("клип пропущен: %v — увеличьте пребуфер в настройках камеры", err)
+			return
+		}
 		log.Warn().Err(err).Str("camera_id", cameraID.String()[:8]).Msg("не удалось собрать клип")
 		return
 	}

@@ -47,6 +47,27 @@ class DetectionConfig:
     plate_pattern: str = ""
     plate_min_confidence: float = 0.3
 
+    # --- Фильтры точности ---
+    # Минимальная площадь объекта в долях от площади кадра. Отсекает мелкие
+    # ложные рамки, которые YOLO ставит на шум, блики и фрагменты текстур.
+    #
+    # Значение 0.004 (0,4%) подобрано по замеру: человек вдали занимает
+    # около 1,7% кадра субпотока, а шум — меньше 0,3%.
+    min_object_area: float = 0.004
+    # Максимальная площадь: защита от «объекта на весь кадр» при смене
+    # освещения или запотевании объектива. 1 — без ограничения.
+    max_object_area: float = 0.9
+    # Максимальное отношение длинной стороны рамки к короткой. Вытянутые
+    # рамки — обычно тени, столбы и отражения. 0 — без проверки.
+    max_aspect_ratio: float = 5.0
+    # Сколько секунд объект должен простоять на месте, чтобы перестать
+    # считаться целью. 0 — проверка выключена.
+    static_seconds: float = 0.0
+    # Порог уверенности человека в кадре для запуска распознавания лиц.
+    face_min_confidence: float = 0.6
+    # Требовать ли человека в кадре перед распознаванием лиц.
+    face_requires_person: bool = True
+
     # --- Звук ---
     # Анализ звука ведёт отдельный конвейер (см. audio_detection.py):
     # звук читается из потока MediaMTX и классифицируется YAMNet.
@@ -90,6 +111,8 @@ class DetectionConfigStore:
         self._last_reload = 0.0
         # Время последнего события по (камера, класс) — для паузы между событиями
         self._last_event: dict[tuple[str, str], float] = {}
+        # Состояние неподвижности: (камера, класс) -> (x, y, с какого времени)
+        self._static_state: dict[tuple[str, str], tuple[float, float, float]] = {}
 
     def get(self, camera_id: str) -> Optional[DetectionConfig]:
         """Настройки камеры; None — если детекция для неё не настроена/выключена."""
@@ -145,6 +168,9 @@ class DetectionConfigStore:
                            d.prebuffer_sec, d.postbuffer_sec, d.cooldown_sec,
                            d.plate_zone, d.plate_min_length, d.plate_max_length,
                            d.plate_pattern, d.plate_min_confidence,
+                           d.min_object_area, d.max_object_area,
+                           d.max_aspect_ratio, d.static_seconds,
+                           d.face_min_confidence, d.face_requires_person,
                            COALESCE(a.enabled AND a.detect_audio, false) AS audio_enabled,
                            COALESCE(a.audio_events, ARRAY[]::text[]) AS audio_events,
                            COALESCE(a.audio_threshold, 0.5) AS audio_threshold
@@ -172,6 +198,14 @@ class DetectionConfigStore:
                         plate_max_length=row.get("plate_max_length") or 12,
                         plate_pattern=row.get("plate_pattern") or "",
                         plate_min_confidence=float(row.get("plate_min_confidence") or 0.3),
+                        min_object_area=float(row.get("min_object_area") or 0.004),
+                        max_object_area=float(row.get("max_object_area") or 0.9),
+                        max_aspect_ratio=float(row.get("max_aspect_ratio") or 5.0),
+                        static_seconds=float(row.get("static_seconds") or 0.0),
+                        face_min_confidence=float(row.get("face_min_confidence") or 0.6),
+                        face_requires_person=bool(
+                            row.get("face_requires_person", True)
+                        ),
                         audio_enabled=bool(row.get("audio_enabled")),
                         audio_events=list(row.get("audio_events") or []),
                         audio_threshold=float(row.get("audio_threshold") or 0.5),
@@ -182,7 +216,7 @@ class DetectionConfigStore:
 
     def should_report(self, cfg: DetectionConfig, obj_class: str, confidence: float,
                       bbox: dict, frame_w: int, frame_h: int) -> bool:
-        """Проходит ли объект фильтры настроек (класс, порог, зона)."""
+        """Проходит ли объект фильтры настроек (класс, порог, зона, форма)."""
         if not cfg.wants_objects:
             return False
         if confidence < cfg.min_confidence:
@@ -191,11 +225,104 @@ class DetectionConfigStore:
         # явно отключает обнаружение объектов, оставляя другие типы детекции.
         if cfg.object_classes and obj_class not in cfg.object_classes:
             return False
+        # Геометрия рамки: размер и форма. Проверка идёт до зоны: она
+        # дешевле и отсекает основную часть мусора.
+        if not self._size_ok(cfg, bbox, frame_w, frame_h):
+            return False
         if cfg.zone:
             center = bbox_center(bbox, frame_w, frame_h)
             if not point_in_polygon(center, cfg.zone):
                 return False
         return True
+
+    @staticmethod
+    def _size_ok(cfg: DetectionConfig, bbox: dict, frame_w: int, frame_h: int) -> bool:
+        """Проверяет размер и форму рамки объекта.
+
+        Три независимые проверки:
+
+        1. Площадь не меньше порога. Мелкие рамки YOLO ставит на шум,
+           блики и случайные текстуры — это основной источник ложных
+           срабатываний на улице и в темноте.
+        2. Площадь не больше порога. Обратная ошибка: при смене освещения
+           или запотевании объектива детектор обводит весь кадр.
+        3. Форма близка к прямоугольной. Тени, столбы и отражения дают
+           сильно вытянутые рамки, которые настоящими объектами не являются.
+        """
+        w = max(1, int(bbox.get("w", 0)))
+        h = max(1, int(bbox.get("h", 0)))
+        frame_area = max(1, frame_w * frame_h)
+        area = (w * h) / frame_area
+
+        if cfg.min_object_area > 0 and area < cfg.min_object_area:
+            return False
+        if 0 < cfg.max_object_area < 1 and area > cfg.max_object_area:
+            return False
+
+        if cfg.max_aspect_ratio > 0:
+            long_side, short_side = max(w, h), max(1, min(w, h))
+            if long_side / short_side > cfg.max_aspect_ratio:
+                return False
+        return True
+
+    # Горизонтальный/вертикальный объект, который стоит на месте, скорее
+    # всего не цель, а предмет обстановки. Держим последнюю позицию и время,
+    # когда объект впервые оказался в пределах допуска.
+    STATIC_TOLERANCE = 0.02  # доля кадра, в пределах которой объект считается неподвижным
+
+    def is_static(self, cfg: DetectionConfig, camera_id: str, obj_class: str,
+                  bbox: dict, frame_w: int, frame_h: int) -> bool:
+        """True, если объект долго не двигается и его не нужно показывать.
+
+        Ключ — камера и класс, без track_id: трекеры часто сбрасываются, и
+        опираться на них нельзя. Если объект класса «мебель» стоит на месте
+        дольше заданного времени, события по нему прекращаются.
+        """
+        if cfg.static_seconds <= 0:
+            return False
+
+        center = bbox_center(bbox, frame_w, frame_h)
+        key = (camera_id, obj_class)
+        now = time.monotonic()
+        prev = self._static_state.get(key)
+
+        if prev is not None:
+            prev_x, prev_y, since = prev
+            dx = abs(center["x"] - prev_x)
+            dy = abs(center["y"] - prev_y)
+            if dx <= self.STATIC_TOLERANCE and dy <= self.STATIC_TOLERANCE:
+                # Объект на прежнем месте: смотрим, как давно он там стоит.
+                self._static_state[key] = (center["x"], center["y"], since)
+                return (now - since) >= cfg.static_seconds
+            # Объект сместился — отсчёт начинается заново.
+            self._static_state[key] = (center["x"], center["y"], now)
+            return False
+
+        self._static_state[key] = (center["x"], center["y"], now)
+        return False
+
+    def should_recognize_faces(self, cfg: DetectionConfig, events: list[dict]) -> bool:
+        """Стоит ли запускать распознавание лиц на этом кадре.
+
+        Основной источник шума: распознавание запускалось на любом кадре, и
+        модель находила «лица» в текстурах. Теперь кадр допускается к
+        распознаванию только при уверенном человеке в кадре.
+        """
+        if not cfg.wants_faces:
+            return False
+        if not cfg.face_requires_person:
+            return True
+
+        for ev in events:
+            if ev.get("object_class") != "person":
+                continue
+            if float(ev.get("confidence", 0)) >= cfg.face_min_confidence:
+                return True
+        return False
+
+    def reset_static_state(self, camera_id: str, obj_class: str):
+        """Забывает состояние неподвижности — при выключении детекции камеры."""
+        self._static_state.pop((camera_id, obj_class), None)
 
     def in_cooldown(self, camera_id: str, obj_class: str, cfg: DetectionConfig) -> bool:
         """True, если событие этого класса приходит слишком часто."""

@@ -203,6 +203,26 @@ type DetectionSettings struct {
 	PlatePattern       string    `json:"plate_pattern"`
 	PlateMinConfidence float64   `json:"plate_min_confidence"`
 	UpdatedAt          time.Time `json:"updated_at"`
+
+	// Фильтры точности: отсекают ложные срабатывания детектора.
+	// MinObjectArea — минимальная площадь объекта в долях от площади кадра.
+	// Отсекает мелкие рамки, которые YOLO ставит на шум и блики.
+	MinObjectArea float64 `json:"min_object_area"`
+	// MaxObjectArea — максимальная площадь: защита от «объекта на весь кадр»
+	// при смене освещения или запотевании. 1 = без ограничения.
+	MaxObjectArea float64 `json:"max_object_area"`
+	// MaxAspectRatio — максимальное отношение сторон рамки. Вытянутые рамки
+	// обычно оказываются тенями и столбами. 0 = без проверки.
+	MaxAspectRatio float64 `json:"max_aspect_ratio"`
+	// StaticSeconds — сколько секунд объект должен простоять на месте, чтобы
+	// перестать считаться целью. 0 = проверка выключена.
+	StaticSeconds float64 `json:"static_seconds"`
+	// FaceMinConfidence — порог уверенности человека в кадре для запуска
+	// распознавания лиц.
+	FaceMinConfidence float64 `json:"face_min_confidence"`
+	// FaceRequiresPerson — запускать распознавание лиц только при уверенном
+	// человеке в кадре. Без этого модель находит «лица» в текстурах.
+	FaceRequiresPerson bool `json:"face_requires_person"`
 }
 
 // UpdateDetectionSettingsRequest — частичное обновление настроек детекции.
@@ -225,6 +245,14 @@ type UpdateDetectionSettingsRequest struct {
 	PlateMaxLength     *int     `json:"plate_max_length,omitempty"`
 	PlatePattern       *string  `json:"plate_pattern,omitempty"`
 	PlateMinConfidence *float64 `json:"plate_min_confidence,omitempty"`
+
+	// Фильтры точности. Указатели: nil означает «не менять значение».
+	MinObjectArea      *float64 `json:"min_object_area,omitempty"`
+	MaxObjectArea      *float64 `json:"max_object_area,omitempty"`
+	MaxAspectRatio     *float64 `json:"max_aspect_ratio,omitempty"`
+	StaticSeconds      *float64 `json:"static_seconds,omitempty"`
+	FaceMinConfidence  *float64 `json:"face_min_confidence,omitempty"`
+	FaceRequiresPerson *bool    `json:"face_requires_person,omitempty"`
 }
 
 // StorageConfig — куда складывать записи и снимки.

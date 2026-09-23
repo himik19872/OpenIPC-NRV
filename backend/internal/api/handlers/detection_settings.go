@@ -220,6 +220,34 @@ func validateDetectionSettings(req *domain.UpdateDetectionSettingsRequest) error
 	if req.PlateMinConfidence != nil && (*req.PlateMinConfidence < 0 || *req.PlateMinConfidence > 1) {
 		return errStr("plate_min_confidence must be between 0 and 1")
 	}
+
+	// --- Фильтры точности ---
+	// Границы площадей заданы долями кадра, поэтому допустимы только 0..1.
+	if req.MinObjectArea != nil && (*req.MinObjectArea < 0 || *req.MinObjectArea > 1) {
+		return errStr("min_object_area must be between 0 and 1")
+	}
+	if req.MaxObjectArea != nil && (*req.MaxObjectArea < 0 || *req.MaxObjectArea > 1) {
+		return errStr("max_object_area must be between 0 and 1")
+	}
+	// Смысл появляется только при min < max: иначе не пройдёт ни один объект.
+	if req.MinObjectArea != nil && req.MaxObjectArea != nil &&
+		*req.MinObjectArea >= *req.MaxObjectArea && *req.MaxObjectArea > 0 {
+		return errStr("min_object_area must be less than max_object_area")
+	}
+	// Отношение сторон: 1 — квадрат, значения меньше 1 не имеют смысла.
+	// 0 означает «не проверять».
+	if req.MaxAspectRatio != nil && *req.MaxAspectRatio != 0 &&
+		(*req.MaxAspectRatio < 1 || *req.MaxAspectRatio > 20) {
+		return errStr("max_aspect_ratio must be 0 (off) or between 1 and 20")
+	}
+	// Неподвижность: 0 выключает проверку, верхняя граница — час.
+	if req.StaticSeconds != nil && (*req.StaticSeconds < 0 || *req.StaticSeconds > 3600) {
+		return errStr("static_seconds must be between 0 and 3600")
+	}
+	if req.FaceMinConfidence != nil &&
+		(*req.FaceMinConfidence < 0 || *req.FaceMinConfidence > 1) {
+		return errStr("face_min_confidence must be between 0 and 1")
+	}
 	return nil
 }
 

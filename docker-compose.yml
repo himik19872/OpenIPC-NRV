@@ -138,7 +138,7 @@ services:
       MODEL_PATH: "yolov8n.pt"
       # 'cuda'/'0' — GPU, 'cpu' — только CPU (см. resolve_device в main.py)
       DEVICE: "${AI_DEVICE:-cuda}"
-      CONFIDENCE: "0.4"
+      CONFIDENCE: "0.25"
       # Трекинг объектов даёт track_id, но чувствителен к смене разрешения кадра.
       # TRACK=false отключает его — события продолжат сохраняться без track_id.
       TRACK: "${AI_TRACK:-true}"

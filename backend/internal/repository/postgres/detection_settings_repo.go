@@ -31,7 +31,9 @@ func (r *DetectionSettingsRepo) Get(ctx context.Context, cameraID uuid.UUID) (*d
 		          zone, line, line_direction, save_snapshots, record_mode,
 		          prebuffer_sec, postbuffer_sec, cooldown_sec,
 		          plate_zone, plate_min_length, plate_max_length, plate_pattern,
-		          plate_min_confidence, updated_at`
+		          plate_min_confidence,
+		          min_object_area, max_object_area, max_aspect_ratio, static_seconds,
+		          face_min_confidence, face_requires_person, updated_at`
 
 	var s domain.DetectionSettings
 	var zoneRaw, lineRaw, plateZoneRaw []byte
@@ -40,7 +42,9 @@ func (r *DetectionSettingsRepo) Get(ctx context.Context, cameraID uuid.UUID) (*d
 		&zoneRaw, &lineRaw, &s.LineDirection, &s.SaveSnapshots, &s.RecordMode,
 		&s.PrebufferSec, &s.PostbufferSec, &s.CooldownSec,
 		&plateZoneRaw, &s.PlateMinLength, &s.PlateMaxLength, &s.PlatePattern,
-		&s.PlateMinConfidence, &s.UpdatedAt,
+		&s.PlateMinConfidence,
+		&s.MinObjectArea, &s.MaxObjectArea, &s.MaxAspectRatio, &s.StaticSeconds,
+		&s.FaceMinConfidence, &s.FaceRequiresPerson, &s.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get detection settings: %w", err)
@@ -60,7 +64,9 @@ func (r *DetectionSettingsRepo) GetIfExists(ctx context.Context, cameraID uuid.U
 		       zone, line, line_direction, save_snapshots, record_mode,
 		       prebuffer_sec, postbuffer_sec, cooldown_sec,
 		       plate_zone, plate_min_length, plate_max_length, plate_pattern,
-		       plate_min_confidence, updated_at
+		       plate_min_confidence,
+		       min_object_area, max_object_area, max_aspect_ratio, static_seconds,
+		       face_min_confidence, face_requires_person, updated_at
 		FROM detection_settings WHERE camera_id = $1`
 
 	var s domain.DetectionSettings
@@ -70,7 +76,9 @@ func (r *DetectionSettingsRepo) GetIfExists(ctx context.Context, cameraID uuid.U
 		&zoneRaw, &lineRaw, &s.LineDirection, &s.SaveSnapshots, &s.RecordMode,
 		&s.PrebufferSec, &s.PostbufferSec, &s.CooldownSec,
 		&plateZoneRaw, &s.PlateMinLength, &s.PlateMaxLength, &s.PlatePattern,
-		&s.PlateMinConfidence, &s.UpdatedAt,
+		&s.PlateMinConfidence,
+		&s.MinObjectArea, &s.MaxObjectArea, &s.MaxAspectRatio, &s.StaticSeconds,
+		&s.FaceMinConfidence, &s.FaceRequiresPerson, &s.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -93,7 +101,9 @@ func (r *DetectionSettingsRepo) ListEnabled(ctx context.Context) ([]domain.Detec
 		       zone, line, line_direction, save_snapshots, record_mode,
 		       prebuffer_sec, postbuffer_sec, cooldown_sec,
 		       plate_zone, plate_min_length, plate_max_length, plate_pattern,
-		       plate_min_confidence, updated_at
+		       plate_min_confidence,
+		       min_object_area, max_object_area, max_aspect_ratio, static_seconds,
+		       face_min_confidence, face_requires_person, updated_at
 		FROM detection_settings WHERE enabled = true`
 
 	rows, err := r.db.Query(ctx, q)
@@ -111,7 +121,9 @@ func (r *DetectionSettingsRepo) ListEnabled(ctx context.Context) ([]domain.Detec
 			&zoneRaw, &lineRaw, &s.LineDirection, &s.SaveSnapshots, &s.RecordMode,
 			&s.PrebufferSec, &s.PostbufferSec, &s.CooldownSec,
 			&plateZoneRaw, &s.PlateMinLength, &s.PlateMaxLength, &s.PlatePattern,
-			&s.PlateMinConfidence, &s.UpdatedAt,
+			&s.PlateMinConfidence,
+			&s.MinObjectArea, &s.MaxObjectArea, &s.MaxAspectRatio, &s.StaticSeconds,
+			&s.FaceMinConfidence, &s.FaceRequiresPerson, &s.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan detection settings: %w", err)
 		}
@@ -147,12 +159,20 @@ func (r *DetectionSettingsRepo) Update(ctx context.Context, cameraID uuid.UUID, 
 			plate_max_length    = COALESCE($16, detection_settings.plate_max_length),
 			plate_pattern       = COALESCE($17, detection_settings.plate_pattern),
 			plate_min_confidence = COALESCE($18, detection_settings.plate_min_confidence),
+			min_object_area      = COALESCE($19, detection_settings.min_object_area),
+			max_object_area      = COALESCE($20, detection_settings.max_object_area),
+			max_aspect_ratio     = COALESCE($21, detection_settings.max_aspect_ratio),
+			static_seconds       = COALESCE($22, detection_settings.static_seconds),
+			face_min_confidence  = COALESCE($23, detection_settings.face_min_confidence),
+			face_requires_person = COALESCE($24, detection_settings.face_requires_person),
 			updated_at     = now()
 		RETURNING camera_id, enabled, object_classes, min_confidence, detect_types,
 		          zone, line, line_direction, save_snapshots, record_mode,
 		          prebuffer_sec, postbuffer_sec, cooldown_sec,
 		          plate_zone, plate_min_length, plate_max_length, plate_pattern,
-		          plate_min_confidence, updated_at`
+		          plate_min_confidence,
+		          min_object_area, max_object_area, max_aspect_ratio, static_seconds,
+		          face_min_confidence, face_requires_person, updated_at`
 
 	var zoneJSON, lineJSON, plateZoneJSON *string
 	if req.Zone != nil {
@@ -181,12 +201,16 @@ func (r *DetectionSettingsRepo) Update(ctx context.Context, cameraID uuid.UUID, 
 		req.PrebufferSec, req.PostbufferSec, req.CooldownSec,
 		plateZoneJSON, req.PlateMinLength, req.PlateMaxLength, req.PlatePattern,
 		req.PlateMinConfidence,
+		req.MinObjectArea, req.MaxObjectArea, req.MaxAspectRatio, req.StaticSeconds,
+		req.FaceMinConfidence, req.FaceRequiresPerson,
 	).Scan(
 		&s.CameraID, &s.Enabled, &s.ObjectClasses, &s.MinConfidence, &s.DetectTypes,
 		&zoneRaw, &lineRaw, &s.LineDirection, &s.SaveSnapshots, &s.RecordMode,
 		&s.PrebufferSec, &s.PostbufferSec, &s.CooldownSec,
 		&plateZoneRaw, &s.PlateMinLength, &s.PlateMaxLength, &s.PlatePattern,
-		&s.PlateMinConfidence, &s.UpdatedAt,
+		&s.PlateMinConfidence,
+		&s.MinObjectArea, &s.MaxObjectArea, &s.MaxAspectRatio, &s.StaticSeconds,
+		&s.FaceMinConfidence, &s.FaceRequiresPerson, &s.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update detection settings: %w", err)

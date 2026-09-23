@@ -267,13 +267,19 @@ async def main():
             logger.error(f"[{camera_id[:8]}] ошибка детекции: {e}")
             return
 
-        # Применяем настройки камеры: классы, порог, зона, пауза между событиями.
+        # Применяем настройки камеры: классы, порог, зона, форма рамки,
+        # неподвижность и пауза между событиями.
         events = []
         if cfg is not None and img is not None:
             h, w = img.shape[:2]
             for ev in raw_events:
                 if not config_store.should_report(cfg, ev["object_class"],
                                                   ev["confidence"], ev["bbox"], w, h):
+                    continue
+                # Неподвижный объект перестаём показывать: стул или тень не
+                # должны давать событие каждые несколько секунд.
+                if config_store.is_static(cfg, camera_id, ev["object_class"],
+                                          ev["bbox"], w, h):
                     continue
                 if config_store.in_cooldown(camera_id, ev["object_class"], cfg):
                     continue
@@ -294,7 +300,9 @@ async def main():
         face_probes = []
         plate_probes = []
         if cfg is not None and img is not None:
-            if face_rec is not None and cfg.wants_faces:
+            # Лица ищем только там, где уверенно найден человек: иначе модель
+            # находит «лица» в текстурах и даёт больше событий, чем людей.
+            if face_rec is not None and config_store.should_recognize_faces(cfg, events):
                 try:
                     face_probes = await asyncio.to_thread(face_rec.detect, img)
                 except Exception as e:

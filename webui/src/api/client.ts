@@ -658,6 +658,20 @@ export interface DetectionSettings {
   plate_max_length: number
   plate_pattern: string
   plate_min_confidence: number
+
+  // Фильтры точности: отсекают ложные срабатывания детектора.
+  // min_object_area — минимальная площадь объекта в долях от площади кадра.
+  min_object_area: number
+  max_object_area: number
+  // max_aspect_ratio — максимальное отношение сторон рамки, 0 = без проверки.
+  max_aspect_ratio: number
+  // static_seconds — время неподвижности, после которого объект перестаёт
+  // считаться целью. 0 = проверка выключена.
+  static_seconds: number
+  // face_min_confidence — порог уверенности человека для запуска поиска лиц.
+  face_min_confidence: number
+  // face_requires_person — искать лица только при человеке в кадре.
+  face_requires_person: boolean
   updated_at: string
 }
 
